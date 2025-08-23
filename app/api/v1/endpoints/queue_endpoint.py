@@ -76,7 +76,7 @@ class QueueEndpoint:
             
             return ResponseSchema(
                 success=True,
-                data=queues_info
+                data={"queues": queues_info, "total_queues": len(queues_info)}
             )
             
         except Exception as e:

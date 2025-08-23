@@ -63,7 +63,7 @@ class UrlEndpoint:
             
             return ResponseSchema(
                 success=True,
-                data=data
+                data={"urls": data, "total_urls": len(data), "page": page, "limit": limit}
             )
             
         except Exception as e:

@@ -92,7 +92,7 @@ class DataEndpoint:
             
             return ResponseSchema(
                 success=True,
-                data=data
+                data={"records": data, "total_records": len(data), "page": page, "limit": limit}
             )
             
         except Exception as e:
