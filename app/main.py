@@ -1,0 +1,180 @@
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+import asyncio
+from app.core.database import db_manager
+from app.core.workers import data_worker, url_worker, url_feeder
+from app.core.config import settings
+from app.api.v1.router import api_router
+from app.core.logging import logger
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting NewsBreak Scraper API...")
+    
+    # Initialize database and RabbitMQ connections
+    await db_manager.initialize_connections()
+    await db_manager.setup_queues()
+    
+    # Setup database tables
+    await setup_database()
+    
+    # Start background workers
+    asyncio.create_task(data_worker.start())
+    asyncio.create_task(url_worker.start())
+    asyncio.create_task(url_feeder.start())
+    
+    logger.info("NewsBreak Scraper API started successfully")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down NewsBreak Scraper API...")
+    
+    # Stop all workers
+    await data_worker.stop()
+    await url_worker.stop()
+    await url_feeder.stop()
+    
+    # Cleanup connections
+    await db_manager.cleanup_connections()
+    
+    logger.info("NewsBreak Scraper API shutdown complete")
+
+async def setup_database():
+    """Setup database tables"""
+    try:
+        data_pool = db_manager.get_data_pool()
+        url_pool = db_manager.get_url_pool()
+        
+        async with data_pool.acquire() as conn:
+            # Create all tables
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS source_data (
+                    source_id SERIAL PRIMARY KEY,
+                    source_name VARCHAR(255) UNIQUE NOT NULL
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS city_data (
+                    city_id SERIAL PRIMARY KEY,
+                    city_name VARCHAR(255) UNIQUE NOT NULL
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS text_category_data (
+                    text_category_id SERIAL PRIMARY KEY,
+                    category_name VARCHAR(255) UNIQUE NOT NULL
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS nf_entities_data (
+                    nf_entities_id SERIAL PRIMARY KEY,
+                    entity_name VARCHAR(255) UNIQUE NOT NULL
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS nf_tags_data (
+                    nf_tags_id SERIAL PRIMARY KEY,
+                    tag_name VARCHAR(255) UNIQUE NOT NULL
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS newsbreak_data (
+                    id VARCHAR(255) PRIMARY KEY,
+                    likeCount INTEGER,
+                    commentCount INTEGER,
+                    source_id INTEGER REFERENCES source_data(source_id),
+                    city_id INTEGER REFERENCES city_data(city_id),
+                    title TEXT,
+                    origin_url TEXT,
+                    share_count INTEGER,
+                    first_text_category_id INTEGER REFERENCES text_category_data(text_category_id),
+                    second_text_category_id INTEGER REFERENCES text_category_data(text_category_id),
+                    third_text_category_id INTEGER REFERENCES text_category_data(text_category_id),
+                    first_text_category_value FLOAT,
+                    second_text_category_value FLOAT,
+                    third_text_category_value FLOAT,
+                    nf_entities_id INTEGER REFERENCES nf_entities_data(nf_entities_id),
+                    nf_entities_value FLOAT,
+                    nf_tags_id INTEGER REFERENCES nf_tags_data(nf_tags_id),
+                    workspace_id UUID,
+                    created_by UUID,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    status VARCHAR(50) DEFAULT 'creating',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create indexes
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_created_at ON newsbreak_data(created_at)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_status ON newsbreak_data(status)")
+
+        async with url_pool.acquire() as conn:
+            # Create URLs table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS urls (
+                    url TEXT PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_scraped TIMESTAMP NULL,
+                    scrape_count INTEGER DEFAULT 0
+                )
+            """)
+            
+            # Add the missing last_scraped column if table exists but column doesn't
+            try:
+                await conn.execute("""
+                    ALTER TABLE urls 
+                    ADD COLUMN IF NOT EXISTS last_scraped TIMESTAMP NULL
+                """)
+            except Exception as e:
+                logger.debug(f"Column last_scraped might already exist: {e}")
+            
+            # Add the missing scrape_count column if table exists but column doesn't
+            try:
+                await conn.execute("""
+                    ALTER TABLE urls 
+                    ADD COLUMN IF NOT EXISTS scrape_count INTEGER DEFAULT 0
+                """)
+            except Exception as e:
+                logger.debug(f"Column scrape_count might already exist: {e}")
+            
+            # Add index for performance
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_last_scraped ON urls(last_scraped)")
+            
+        logger.info("Database tables setup successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to setup database: {e}")
+        raise
+
+# Create FastAPI app instance
+app = FastAPI(
+    title=settings.app_name,
+    description="API for scraping NewsBreak.com with cyclic workflow using RabbitMQ queues and PostgreSQL storage",
+    version=settings.app_version,
+    lifespan=lifespan
+)
+
+# Include API router
+app.include_router(api_router, prefix="/api/v1")
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {
+        "message": "NewsBreak Scraper API",
+        "version": settings.app_version,
+        "docs": "/docs",
+        "health": "/api/v1/health"
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

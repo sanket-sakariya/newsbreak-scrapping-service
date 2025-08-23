@@ -1,0 +1,702 @@
+openapi: 3.0.3
+info:
+  title: NewsBreak Scraper API
+  description: API for scraping NewsBreak.com with cyclic workflow using RabbitMQ queues and PostgreSQL storage
+  version: 1.0.0
+  contact:
+    name: NewsBreak Scraper Team
+    email: scraper@example.com
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+  - url: https://api.newsbreakscraper.com
+    description: Production server
+
+tags:
+  - name: Scraper
+    description: Main scraping operations and workflow management
+  - name: Queue Management
+    description: RabbitMQ queue operations and monitoring
+  - name: Data Management
+    description: Database operations for scraped data
+  - name: URL Management
+    description: URL collection and deduplication
+
+paths:
+  /scraper/start:
+    post:
+      tags:
+        - Scraper
+      summary: Start the scraping process
+      operationId: startScraping
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                initial_urls:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+                  description: Initial URLs to start scraping from
+                  example: ["https://www.newsbreak.com/news", "https://www.newsbreak.com/politics"]
+                batch_size:
+                  type: integer
+                  default: 100
+                  description: Number of URLs to process in each batch
+                  example: 100
+                worker_count:
+                  type: integer
+                  default: 5
+                  description: Number of worker processes to spawn
+                  example: 5
+              required:
+                - initial_urls
+      responses:
+        '200':
+          description: Scraping process started successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      job_id:
+                        type: string
+                        format: uuid
+                        example: "bd08612-1a9d-4a6e-8431-1jobid"
+                      status:
+                        type: string
+                        example: "started"
+                      worker_count:
+                        type: integer
+                        example: 5
+                      initial_url_count:
+                        type: integer
+                        example: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /scraper/stop:
+    post:
+      tags:
+        - Scraper
+      summary: Stop the scraping process
+      operationId: stopScraping
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                job_id:
+                  type: string
+                  format: uuid
+                  description: Specific job ID to stop (optional)
+                  example: "bd08612-1a9d-4a6e-8431-1jobid"
+                force:
+                  type: boolean
+                  default: false
+                  description: Force stop even if workers are busy
+                  example: false
+      responses:
+        '200':
+          description: Scraping process stopped successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      message:
+                        type: string
+                        example: "Scraping process stopped successfully"
+                      stopped_workers:
+                        type: integer
+                        example: 5
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /scraper/status:
+    get:
+      tags:
+        - Scraper
+      summary: Get scraping process status and statistics
+      operationId: getScrapingStatus
+      responses:
+        '200':
+          description: Scraping status retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: ['running', 'stopped', 'paused', 'error']
+                        example: "running"
+                      statistics:
+                        type: object
+                        properties:
+                          urls_processed:
+                            type: integer
+                            example: 1250
+                          data_extracted:
+                            type: integer
+                            example: 1180
+                          errors_count:
+                            type: integer
+                            example: 70
+                          active_workers:
+                            type: integer
+                            example: 5
+                          queue_sizes:
+                            type: object
+                            properties:
+                              scraper_queue:
+                                type: integer
+                                example: 450
+                              newsbreak_urls_queue:
+                                type: integer
+                                example: 2340
+                              newsbreak_data_queue:
+                                type: integer
+                                example: 890
+                              dlx_queue:
+                                type: integer
+                                example: 15
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /queues:
+    get:
+      tags:
+        - Queue Management
+      summary: Get all queue statistics and information
+      operationId: getQueueStatistics
+      responses:
+        '200':
+          description: Queue statistics retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Queue name
+                          example: "scraper_queue"
+                        message_count:
+                          type: integer
+                          description: Number of messages in queue
+                          example: 450
+                        consumer_count:
+                          type: integer
+                          description: Number of active consumers
+                          example: 3
+                        status:
+                          type: string
+                          enum: ['active', 'idle', 'error']
+                          description: Queue status
+                          example: "active"
+                        last_activity:
+                          type: string
+                          format: date-time
+                          description: Timestamp of last activity
+                          example: "2024-01-15T10:30:00Z"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /queues/{queue_name}/purge:
+    delete:
+      tags:
+        - Queue Management
+      summary: Purge all messages from a specific queue
+      operationId: purgeQueue
+      parameters:
+        - name: queue_name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: ['scraper_queue', 'newsbreak_urls_queue', 'newsbreak_data_queue', 'dlx_queue']
+          description: Name of the queue to purge
+          example: "scraper_queue"
+      responses:
+        '200':
+          description: Queue purged successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      queue_name:
+                        type: string
+                        example: "scraper_queue"
+                      messages_purged:
+                        type: integer
+                        example: 450
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /newsbreak/data:
+    get:
+      tags:
+        - Data Management
+      summary: Retrieve scraped NewsBreak data with pagination
+      operationId: getNewsbreakData
+      responses:
+        '200':
+          description: NewsBreak data retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NewsbreakData'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /newsbreak/data/{id}:
+    get:
+      tags:
+        - Data Management
+      summary: Retrieve specific NewsBreak data record
+      operationId: getNewsbreakDataById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: NewsBreak data record ID
+          example: "13lIpC1O"
+      responses:
+        '200':
+          description: NewsBreak data record retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/NewsbreakData'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /newsbreak/urls:
+    get:
+      tags:
+        - URL Management
+      summary: Retrieve collected NewsBreak URLs with pagination
+      operationId: getNewsbreakUrls
+      responses:
+        '200':
+          description: NewsBreak URLs retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NewsbreakUrl'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - URL Management
+      summary: Add URLs to the scraping queue
+      operationId: addUrlsToQueue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                urls:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+                  description: List of URLs to add to the scraping queue
+                  example: ["https://www.newsbreak.com/news/123", "https://www.newsbreak.com/politics/456"]
+              required:
+                - urls
+      responses:
+        '200':
+          description: URLs added to queue successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      urls_added:
+                        type: integer
+                        example: 2
+                      duplicates_skipped:
+                        type: integer
+                        example: 0
+                      queue_size:
+                        type: integer
+                        example: 452
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /newsbreak/urls/deduplicate:
+    post:
+      tags:
+        - URL Management
+      summary: Run deduplication process on collected URLs
+      operationId: deduplicateUrls
+      responses:
+        '200':
+          description: Deduplication completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      duplicates_removed:
+                        type: integer
+                        example: 45
+                      unique_urls_remaining:
+                        type: integer
+                        example: 2340
+                      processing_time:
+                        type: number
+                        format: float
+                        example: 2.45
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  schemas:
+    NewsbreakData:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Primary key from NewsBreak
+          example: "13lIpC1O"
+        likeCount:
+          type: integer
+          description: Number of likes on the article
+          example: 183
+        commentCount:
+          type: integer
+          description: Number of comments on the article
+          example: 168
+        source_id:
+          type: integer
+          description: Foreign key to source_data table
+          example: 1
+        city_id:
+          type: integer
+          description: Foreign key to city_data table
+          example: 1
+        title:
+          type: string
+          description: Article title
+          example: "Federal judge questions if Trump's deployment of the National Guard in the Los Angeles area is lawful"
+        origin_url:
+          type: string
+          format: uri
+          description: Original URL of the article
+          example: "https://www.cnn.com/2025/08/13/politics/los-angeles-immigration-ice-national-guard-breyer-trial"
+        share_count:
+          type: integer
+          description: Number of shares
+          example: 26
+        first_text_category_id:
+          type: integer
+          description: Foreign key to text_category_data table for first category
+          example: 1
+        second_text_category_id:
+          type: integer
+          description: Foreign key to text_category_data table for second category
+          example: 2
+        third_text_category_id:
+          type: integer
+          description: Foreign key to text_category_data table for third category
+          example: 3
+        first_text_category_value:
+          type: number
+          format: float
+          description: Confidence value for first category
+          example: 0.92442
+        second_text_category_value:
+          type: number
+          format: float
+          description: Confidence value for second category
+          example: 0.79251
+        third_text_category_value:
+          type: number
+          format: float
+          description: Confidence value for third category
+          example: 0.63665
+        nf_entities_id:
+          type: integer
+          description: Foreign key to nf_entities_data table
+          example: 1
+        nf_entities_value:
+          type: number
+          format: float
+          description: Entity relevance score
+          example: 6.0
+        nf_tags_id:
+          type: integer
+          description: Foreign key to nf_tags_data table
+          example: 1
+        workspace_id:
+          type: string
+          format: uuid
+          description: Workspace identifier
+          example: bd08612-1a9d-4a6e-8431-1workspaceid
+        created_by:
+          type: string
+          format: uuid
+          description: ID of user who created the record
+          example: c8d8869-4060-4e8a-ba30-c6da3buserid
+        is_active:
+          type: boolean
+          description: Whether the record is active
+          example: true
+        status:
+          type: string
+          enum: ['creating', 'created', 'updating', 'updated', 'deleting', 'deleted']
+          description: Current processing status of the record
+          example: created
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp when record was created
+          example: "2024-01-15T10:30:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Timestamp when record was last updated
+          example: "2024-01-15T10:30:00Z"
+
+    NewsbreakUrl:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: NewsBreak URL (primary key)
+          example: "https://www.newsbreak.com/news/123456"
+          
+    SourceData:
+      type: object
+      properties:
+        source_id:
+          type: integer
+          description: Primary key (auto increment)
+          example: 1
+        source_name:
+          type: string
+          description: Name of the news source
+          example: "CNN"
+
+    CityData:
+      type: object
+      properties:
+        city_id:
+          type: integer
+          description: Primary key (auto increment)
+          example: 1
+        city_name:
+          type: string
+          description: Name of the city
+          example: "Los Angeles, California"
+
+    TextCategoryData:
+      type: object
+      properties:
+        text_category_id:
+          type: integer
+          description: Primary key (auto increment)
+          example: 1
+        category_name:
+          type: string
+          description: Name of the text category
+          example: "PoliticsGovernment"
+
+    NfEntitiesData:
+      type: object
+      properties:
+        nf_entities_id:
+          type: integer
+          description: Primary key (auto increment)
+          example: 1
+        entity_name:
+          type: string
+          description: Name of the entity
+          example: "Donald_Trump"
+
+    NfTagsData:
+      type: object
+      properties:
+        nf_tags_id:
+          type: integer
+          description: Primary key (auto increment)
+          example: 1
+        tag_name:
+          type: string
+          description: Name of the tag
+          example: "Political_Figures"
+
+  responses:
+    BadRequest:
+      description: Bad request - invalid parameters or request format
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+                example: false
+              error:
+                type: string
+                description: Error message
+                example: "Invalid request parameters"
+              error_code:
+                type: string
+                description: Internal error code for debugging
+                example: "BAD_REQUEST_400"
+              timestamp:
+                type: string
+                format: date-time
+                description: Timestamp when error occurred
+                example: "2024-01-15T10:30:00Z"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+                example: false
+              error:
+                type: string
+                description: Error message
+                example: "Resource not found"
+              error_code:
+                type: string
+                description: Internal error code for debugging
+                example: "NOT_FOUND_404"
+              timestamp:
+                type: string
+                format: date-time
+                description: Timestamp when error occurred
+                example: "2024-01-15T10:30:00Z"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+                example: false
+              error:
+                type: string
+                description: Error message
+                example: "Internal server error"
+              error_code:
+                type: string
+                description: Internal error code for debugging
+                example: "INTERNAL_ERROR_500"
+              timestamp:
+                type: string
+                format: date-time
+                description: Timestamp when error occurred
+                example: "2024-01-15T10:30:00Z"
+

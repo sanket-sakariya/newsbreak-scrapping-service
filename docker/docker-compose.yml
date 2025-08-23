@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL_1=postgresql://sanket:root@postgres_data:5432/newsbreak_scraper_data
+      - DATABASE_URL_2=postgresql://sanket:root@postgres_urls:5432/newsbreak_scraper_urls
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      - postgres_data
+      - postgres_urls
+      - rabbitmq
+    volumes:
+      - ../logs:/app/logs
+    restart: unless-stopped
+
+  postgres_data:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: newsbreak_scraper_data
+      POSTGRES_USER: sanket
+      POSTGRES_PASSWORD: root
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  postgres_urls:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: newsbreak_scraper_urls
+      POSTGRES_USER: sanket
+      POSTGRES_PASSWORD: root
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_urls:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  postgres_urls:
+  rabbitmq_data:
