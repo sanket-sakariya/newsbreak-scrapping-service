@@ -139,37 +139,59 @@ class ScraperWorker:
     def extract_next_data(self, soup: BeautifulSoup) -> Optional[Dict]:
         """Extract data from __NEXT_DATA__ script tag"""
         try:
+            # Find the __NEXT_DATA__ script tag
             script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
             if not script_tag:
+                logger.debug("No __NEXT_DATA__ script tag found")
                 return None
             
+            # Parse the JSON data
             json_data = json.loads(script_tag.string)
             page_props = json_data.get('props', {}).get('pageProps', {})
             
-            if not page_props.get('id'):
+            # Handle both direct pageProps and nested docInfo structures
+            doc_info = page_props.get('docInfo', {}) or page_props
+            
+            # Extract article ID
+            article_id = (doc_info.get('docid') or 
+                         doc_info.get('id') or 
+                         doc_info.get('article_id') or 
+                         doc_info.get('slug'))
+            
+            if not article_id:
+                logger.debug("No article ID found in data")
                 return None
             
-            text_category_obj = page_props.get('text_category', {}) or {}
-            
+            # Extract the data with proper field mapping
             extracted_data = {
-                'id': page_props.get('id'),
-                'likeCount': page_props.get('likeCount', 0),
-                'commentCount': page_props.get('commentCount', 0),
-                'source': page_props.get('source'),
-                'cityName': page_props.get('cityName'),
-                'title': page_props.get('title'),
-                'origin_url': page_props.get('origin_url'),
-                'share_count': page_props.get('share_count', 0),
-                'text_category': text_category_obj,
-                'nf_entities': page_props.get('nf_entities', {}),
-                'nf_tags': page_props.get('nf_tags', [])
+                "id": str(article_id),
+                "title": doc_info.get('title') or doc_info.get('headline'),
+                "source": doc_info.get('source') or doc_info.get('source_name'),
+                "cityName": doc_info.get('cityName') or doc_info.get('city_name'),
+                "likeCount": self._safe_int(doc_info.get('likeCount') or doc_info.get('like')),
+                "commentCount": self._safe_int(doc_info.get('commentCount') or doc_info.get('comment_count')),
+                "share_count": self._safe_int(doc_info.get('share_count') or doc_info.get('shares')),
+                "origin_url": doc_info.get('origin_url') or doc_info.get('original_url'),
+                "text_category": doc_info.get('text_category', {}),
+                "nf_entities": doc_info.get('nf_entities', {}),
+                "nf_tags": doc_info.get('nf_tags', [])
             }
             
             return extracted_data
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON from __NEXT_DATA__: {e}")
+            return None
         except Exception as e:
             logger.error(f"Error extracting __NEXT_DATA__: {e}")
             return None
+    
+    def _safe_int(self, value) -> int:
+        """Safely convert value to int"""
+        try:
+            return int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
     
     async def handle_extracted_data(self, urls: List[str], data: Optional[Dict]):
         """Send extracted URLs and data to their respective queues"""
@@ -272,19 +294,31 @@ class DataWorker:
         try:
             async with db_manager.get_data_pool().acquire() as conn:
                 async with conn.transaction():
+                    logger.info(f"Processing data for ID: {data.get('id')}")
+                    
                     # Insert or get foreign key references
                     source_id = await self.get_or_create_source(conn, data.get('source'))
                     city_id = await self.get_or_create_city(conn, data.get('cityName'))
                     
-                    # Handle text categories
-                    text_category = data.get('text_category', {}) or {}
-                    first_cat_raw = text_category.get('first_cat', {})
-                    second_cat_raw = text_category.get('second_cat', {})
-                    third_cat_raw = text_category.get('third_cat', {})
-
-                    first_cat_id, first_cat_value = await self.process_category(conn, first_cat_raw)
-                    second_cat_id, second_cat_value = await self.process_category(conn, second_cat_raw)
-                    third_cat_id, third_cat_value = await self.process_category(conn, third_cat_raw)
+                    # Handle text categories properly
+                    text_category = data.get('text_category', {})
+                    logger.info(f"Raw text_category data: {text_category}")
+                    
+                    # Process each category level
+                    first_cat_id, first_cat_value = await self.process_category(
+                        conn, text_category.get('first_cat', {})
+                    )
+                    second_cat_id, second_cat_value = await self.process_category(
+                        conn, text_category.get('second_cat', {})
+                    )
+                    third_cat_id, third_cat_value = await self.process_category(
+                        conn, text_category.get('third_cat', {})
+                    )
+                    
+                    logger.info(f"Processed categories:")
+                    logger.info(f"  First: ID={first_cat_id}, value={first_cat_value}")
+                    logger.info(f"  Second: ID={second_cat_id}, value={second_cat_value}")
+                    logger.info(f"  Third: ID={third_cat_id}, value={third_cat_value}")
                     
                     # Handle entities and tags
                     entities_id, entities_value = await self.process_entities(conn, data.get('nf_entities', {}))
@@ -302,6 +336,15 @@ class DataWorker:
                             likeCount = EXCLUDED.likeCount,
                             commentCount = EXCLUDED.commentCount,
                             share_count = EXCLUDED.share_count,
+                            first_text_category_id = EXCLUDED.first_text_category_id,
+                            second_text_category_id = EXCLUDED.second_text_category_id,
+                            third_text_category_id = EXCLUDED.third_text_category_id,
+                            first_text_category_value = EXCLUDED.first_text_category_value,
+                            second_text_category_value = EXCLUDED.second_text_category_value,
+                            third_text_category_value = EXCLUDED.third_text_category_value,
+                            nf_entities_id = EXCLUDED.nf_entities_id,
+                            nf_entities_value = EXCLUDED.nf_entities_value,
+                            nf_tags_id = EXCLUDED.nf_tags_id,
                             updated_at = CURRENT_TIMESTAMP
                     """, 
                         data.get('id'), data.get('likeCount', 0), data.get('commentCount', 0),
@@ -317,6 +360,7 @@ class DataWorker:
             raise
     
     async def get_or_create_source(self, conn, source_name: str) -> Optional[int]:
+        """Get or create source and return ID"""
         if not source_name:
             return None
         
@@ -327,6 +371,7 @@ class DataWorker:
         return await conn.fetchval("INSERT INTO source_data (source_name) VALUES ($1) RETURNING source_id", source_name)
     
     async def get_or_create_city(self, conn, city_name: str) -> Optional[int]:
+        """Get or create city and return ID"""
         if not city_name:
             return None
         
@@ -337,74 +382,99 @@ class DataWorker:
         return await conn.fetchval("INSERT INTO city_data (city_name) VALUES ($1) RETURNING city_id", city_name)
     
     async def process_category(self, conn, category: Dict) -> Tuple[Optional[int], Optional[float]]:
-        """Ensure category exists and return its ID + float value"""
-        if not category:
+        """Process category data and return category ID and confidence value"""
+        if not category or not isinstance(category, dict):
             return None, None
 
-        name: Optional[str] = None
-        value: Optional[float] = None
-
-        if isinstance(category, dict):
-            if "name" in category or "value" in category:
-                name = category.get("name")
-                value_raw = category.get("value")
-                try:
-                    value = float(value_raw) if value_raw is not None else None
-                except (TypeError, ValueError):
-                    value = None
-            else:
-                # Take the first key:value pair where value can be cast to float
-                for k, v in category.items():
-                    try:
-                        value = float(v) if v is not None else None
-                        name = k
-                        break
-                    except (TypeError, ValueError):
-                        continue
-
-        if not name:
-            return None, value
-
-        row = await conn.fetchrow(
-            """
-            INSERT INTO text_category_data (category_name)
-            VALUES ($1)
-            ON CONFLICT (category_name) DO UPDATE SET category_name = EXCLUDED.category_name
-            RETURNING text_category_id
-            """,
-            name,
-        )
-        return row["text_category_id"], value
+        try:
+            # Extract the first (and typically only) key-value pair
+            # Example: {"PoliticsGovernment": 0.92442}
+            category_name = list(category.keys())[0]
+            category_value = list(category.values())[0]
+            
+            # Convert value to float
+            try:
+                confidence_value = float(category_value) if category_value is not None else None
+            except (TypeError, ValueError):
+                logger.warning(f"Could not convert category value to float: {category_value}")
+                confidence_value = None
+            
+            # Insert or get category ID from text_category_data table
+            category_id = await conn.fetchval(
+                """
+                INSERT INTO text_category_data (category_name)
+                VALUES ($1)
+                ON CONFLICT (category_name) DO UPDATE SET category_name = EXCLUDED.category_name
+                RETURNING text_category_id
+                """,
+                category_name
+            )
+            
+            logger.debug(f"Category '{category_name}' -> ID: {category_id}, Value: {confidence_value}")
+            return category_id, confidence_value
+            
+        except (IndexError, KeyError) as e:
+            logger.error(f"Error processing category {category}: {e}")
+            return None, None
     
-    async def process_entities(self, conn, entities_data: Dict) -> tuple:
-        if not entities_data:
+    async def process_entities(self, conn, entities_data: Dict) -> Tuple[Optional[int], Optional[float]]:
+        """Process entities data and return entity ID and value"""
+        if not entities_data or not isinstance(entities_data, dict):
             return None, None
         
-        entity_name = list(entities_data.keys())[0] if entities_data else None
-        entity_value = list(entities_data.values())[0] if entities_data else None
-        
-        if not entity_name:
+        try:
+            # Extract first entity (example: {"Donald_Trump": 6})
+            entity_name = list(entities_data.keys())[0]
+            entity_value = list(entities_data.values())[0]
+            
+            # Get or create entity ID
+            entity_id = await conn.fetchval(
+                """
+                INSERT INTO nf_entities_data (entity_name)
+                VALUES ($1)
+                ON CONFLICT (entity_name) DO UPDATE SET entity_name = EXCLUDED.entity_name
+                RETURNING nf_entities_id
+                """,
+                entity_name
+            )
+            
+            # Convert value to float if possible
+            try:
+                entity_float_value = float(entity_value) if entity_value is not None else None
+            except (TypeError, ValueError):
+                entity_float_value = None
+            
+            return entity_id, entity_float_value
+            
+        except (IndexError, KeyError) as e:
+            logger.error(f"Error processing entities {entities_data}: {e}")
             return None, None
-        
-        result = await conn.fetchval("SELECT nf_entities_id FROM nf_entities_data WHERE entity_name = $1", entity_name)
-        if not result:
-            result = await conn.fetchval("INSERT INTO nf_entities_data (entity_name) VALUES ($1) RETURNING nf_entities_id", entity_name)
-        
-        return result, float(entity_value) if entity_value else None
     
     async def process_tags(self, conn, tags_data: List) -> Optional[int]:
-        if not tags_data:
+        """Process tags data and return first tag ID"""
+        if not tags_data or not isinstance(tags_data, list):
             return None
         
-        tag_name = tags_data[0] if tags_data else None
-        if not tag_name:
+        try:
+            # Get first tag (example: ["Political_Figures"])
+            tag_name = tags_data[0]
+            
+            # Get or create tag ID
+            tag_id = await conn.fetchval(
+                """
+                INSERT INTO nf_tags_data (tag_name)
+                VALUES ($1)
+                ON CONFLICT (tag_name) DO UPDATE SET tag_name = EXCLUDED.tag_name
+                RETURNING nf_tags_id
+                """,
+                tag_name
+            )
+            
+            return tag_id
+            
+        except (IndexError, KeyError) as e:
+            logger.error(f"Error processing tags {tags_data}: {e}")
             return None
-        
-        result = await conn.fetchval("SELECT nf_tags_id FROM nf_tags_data WHERE tag_name = $1", tag_name)
-        if not result:
-            result = await conn.fetchval("INSERT INTO nf_tags_data (tag_name) VALUES ($1) RETURNING nf_tags_id", tag_name)
-        
-        return result
 
 class UrlWorker:
     """Worker to process URL queue and insert into database"""
