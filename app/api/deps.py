@@ -1,6 +1,6 @@
 from typing import Generator
 from app.core.database import db_manager
-from app.core.workers import data_worker, url_worker, url_feeder
+from app.workers import data_worker, url_worker, url_feeder
 
 def get_data_pool():
     """Get data database pool"""

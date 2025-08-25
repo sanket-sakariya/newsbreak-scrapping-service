@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from app.schema.scraper_schema import StartScrapingRequest, StopScrapingRequest, AddUrlsRequest, ScrapingStatusSchema
 from app.schema.base import ResponseSchema
-from app.core.workers import ScraperWorker
+from app.workers import ScraperWorker
 from app.api.deps import get_rabbitmq_channel, get_workers
 from app.core.config import settings
 import asyncio
@@ -57,13 +57,12 @@ class ScraperEndpoint:
                     routing_key=settings.scraper_queue
                 )
             
-            # Start workers
+            # Start workers (numbered 1..N)
             workers_started = 0
-            for i in range(request.worker_count):
-                worker_id = f"{job_id}_worker_{i}"
-                worker = ScraperWorker(worker_id, request.batch_size)
+            for i in range(1, request.worker_count + 1):
+                worker = ScraperWorker(i, request.batch_size)
                 task = asyncio.create_task(worker.start())
-                self.scraper_workers[worker_id] = task
+                self.scraper_workers[str(i)] = task
                 workers_started += 1
             
             logger.info(f"Started {workers_started} scraper workers for job {job_id}")
@@ -86,12 +85,8 @@ class ScraperEndpoint:
         try:
             stopped_workers = 0
             
-            if request and request.job_id:
-                # Stop specific job workers
-                workers_to_stop = [k for k in self.scraper_workers.keys() if k.startswith(request.job_id)]
-            else:
-                # Stop all workers
-                workers_to_stop = list(self.scraper_workers.keys())
+            # Stop all workers (we no longer key by job)
+            workers_to_stop = list(self.scraper_workers.keys())
             
             for worker_id in workers_to_stop:
                 task = self.scraper_workers.pop(worker_id, None)
@@ -142,7 +137,6 @@ class ScraperEndpoint:
             
             async with url_pool.acquire() as conn:
                 urls_processed = await conn.fetchval("SELECT COUNT(*) FROM urls")
-                urls_scraped = await conn.fetchval("SELECT COUNT(*) FROM urls WHERE last_scraped IS NOT NULL")
             
             errors_count = dlx_queue.declaration_result.message_count
             status = "running" if self.scraper_workers else "stopped"
@@ -153,7 +147,6 @@ class ScraperEndpoint:
                     "status": status,
                     "statistics": {
                         "urls_collected": urls_processed or 0,
-                        "urls_scraped": urls_scraped or 0,
                         "data_extracted": data_extracted or 0,
                         "errors_count": errors_count,
                         "active_workers": len(self.scraper_workers),

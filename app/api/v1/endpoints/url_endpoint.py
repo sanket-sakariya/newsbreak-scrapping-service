@@ -49,7 +49,7 @@ class UrlEndpoint:
             
             async with url_pool.acquire() as conn:
                 rows = await conn.fetch("""
-                    SELECT url, created_at, last_scraped, scrape_count FROM urls
+                    SELECT url, created_at FROM urls
                     ORDER BY created_at DESC
                     LIMIT $1 OFFSET $2
                 """, limit, offset)
@@ -57,8 +57,7 @@ class UrlEndpoint:
             data = [{
                 "url": row["url"],
                 "created_at": row["created_at"],
-                "last_scraped": row["last_scraped"],
-                "scrape_count": row["scrape_count"]
+                
             } for row in rows]
             
             return ResponseSchema(

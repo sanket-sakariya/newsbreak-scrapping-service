@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import asyncio
 from app.core.database import db_manager
-from app.core.workers import data_worker, url_worker, url_feeder
+from app.workers import data_worker, url_worker, url_feeder
 from app.core.config import settings
 from app.api.v1.router import api_router
 from app.core.logging import logger
@@ -119,32 +119,14 @@ async def setup_database():
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS urls (
                     url TEXT PRIMARY KEY,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_scraped TIMESTAMP NULL,
-                    scrape_count INTEGER DEFAULT 0
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
-            # Add the missing last_scraped column if table exists but column doesn't
-            try:
-                await conn.execute("""
-                    ALTER TABLE urls 
-                    ADD COLUMN IF NOT EXISTS last_scraped TIMESTAMP NULL
-                """)
-            except Exception as e:
-                logger.debug(f"Column last_scraped might already exist: {e}")
+            # No additional columns
             
-            # Add the missing scrape_count column if table exists but column doesn't
-            try:
-                await conn.execute("""
-                    ALTER TABLE urls 
-                    ADD COLUMN IF NOT EXISTS scrape_count INTEGER DEFAULT 0
-                """)
-            except Exception as e:
-                logger.debug(f"Column scrape_count might already exist: {e}")
             
-            # Add index for performance
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_last_scraped ON urls(last_scraped)")
+            # No additional indexes
             
         logger.info("Database tables setup successfully")
         
