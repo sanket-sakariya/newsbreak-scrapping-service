@@ -528,16 +528,6 @@ components:
           type: integer
           description: Foreign key to nf_tags_data table
           example: 1
-        workspace_id:
-          type: string
-          format: uuid
-          description: Workspace identifier
-          example: bd08612-1a9d-4a6e-8431-1workspaceid
-        created_by:
-          type: string
-          format: uuid
-          description: ID of user who created the record
-          example: c8d8869-4060-4e8a-ba30-c6da3buserid
         is_active:
           type: boolean
           description: Whether the record is active

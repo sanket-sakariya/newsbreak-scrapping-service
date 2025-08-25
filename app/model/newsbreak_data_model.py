@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, Float, ForeignKey, UUID
+from sqlalchemy import Column, Integer, String, Text, Boolean, Float, ForeignKey
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -52,8 +52,6 @@ class NewsbreakDataModel(BaseModel):
     nf_entities_id = Column(Integer, ForeignKey("nf_entities_data.nf_entities_id"))
     nf_entities_value = Column(Float)
     nf_tags_id = Column(Integer, ForeignKey("nf_tags_data.nf_tags_id"))
-    workspace_id = Column(UUID)
-    created_by = Column(UUID)
     is_active = Column(Boolean, default=True)
     status = Column(String(50), default="creating")
     

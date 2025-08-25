@@ -32,8 +32,6 @@ class NewsbreakDataSchema(BaseModel):
     nf_entities_id: int
     nf_entities_value: float
     nf_tags_id: int
-    workspace_id: str
-    created_by: str
     is_active: bool
     status: str
     created_at: str

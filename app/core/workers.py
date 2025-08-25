@@ -2,7 +2,6 @@ import asyncio
 import aiohttp
 import aio_pika
 import json
-import uuid
 import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
@@ -330,8 +329,8 @@ class DataWorker:
                             id, likeCount, commentCount, source_id, city_id, title, origin_url, share_count,
                             first_text_category_id, second_text_category_id, third_text_category_id,
                             first_text_category_value, second_text_category_value, third_text_category_value,
-                            nf_entities_id, nf_entities_value, nf_tags_id, workspace_id, created_by, status
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                            nf_entities_id, nf_entities_value, nf_tags_id, status
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                         ON CONFLICT (id) DO UPDATE SET
                             likeCount = EXCLUDED.likeCount,
                             commentCount = EXCLUDED.commentCount,
@@ -352,7 +351,7 @@ class DataWorker:
                         first_cat_id, second_cat_id, third_cat_id,
                         first_cat_value, second_cat_value, third_cat_value,
                         entities_id, entities_value, tags_id,
-                        str(uuid.uuid4()), str(uuid.uuid4()), 'created'
+                        'created'
                     )
                     
         except Exception as e:

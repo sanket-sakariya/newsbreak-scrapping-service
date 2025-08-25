@@ -71,7 +71,6 @@ class ScraperEndpoint:
             return ResponseSchema(
                 success=True,
                 data={
-                    "job_id": job_id,
                     "status": "started",
                     "worker_count": workers_started,
                     "initial_url_count": len(request.initial_urls)

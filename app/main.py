@@ -103,8 +103,6 @@ async def setup_database():
                     nf_entities_id INTEGER REFERENCES nf_entities_data(nf_entities_id),
                     nf_entities_value FLOAT,
                     nf_tags_id INTEGER REFERENCES nf_tags_data(nf_tags_id),
-                    workspace_id UUID,
-                    created_by UUID,
                     is_active BOOLEAN DEFAULT TRUE,
                     status VARCHAR(50) DEFAULT 'creating',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
