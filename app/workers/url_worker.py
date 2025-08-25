@@ -12,22 +12,37 @@ class UrlWorker:
     def __init__(self):
         self.is_running = False
         self.processed_count = 0
+        self._channel = None
     
     async def start(self):
         """Start the URL worker"""
         self.is_running = True
         logger.info("URL worker started")
+        # Create dedicated channel with higher prefetch for URL consumption
+        try:
+            connection = db_manager.get_rabbitmq_connection()
+            if connection:
+                self._channel = await connection.channel()
+                await self._channel.set_qos(prefetch_count=200)
+        except Exception as e:
+            logger.error(f"Failed to create dedicated channel for UrlWorker: {e}")
         await self.consume_url_queue()
     
     async def stop(self):
         """Stop the URL worker"""
         self.is_running = False
         logger.info(f"URL worker stopped. Processed {self.processed_count} URLs")
+        if self._channel and not self._channel.is_closed:
+            try:
+                await self._channel.close()
+            except Exception:
+                pass
     
     async def consume_url_queue(self):
         """Consume URLs from newsbreak_urls_queue"""
         try:
-            urls_queue = await db_manager.get_rabbitmq_channel().declare_queue(
+            channel = self._channel or db_manager.get_rabbitmq_channel()
+            urls_queue = await channel.declare_queue(
                 settings.newsbreak_urls_queue, 
                 durable=True
             )
@@ -51,21 +66,24 @@ class UrlWorker:
             logger.error(f"URL worker error: {e}")
     
     async def insert_url(self, url: str):
-        """Insert URL into database (with deduplication) and publish to scraper_queue"""
+        """Insert URL into DB; publish to scraper_queue only if newly inserted."""
         try:
+            inserted = False
             async with db_manager.get_url_pool().acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO urls (url) VALUES ($1) ON CONFLICT (url) DO NOTHING", 
+                # RETURNING returns a row only when an insert actually happened
+                inserted = await conn.fetchval(
+                    "INSERT INTO urls (url) VALUES ($1) ON CONFLICT (url) DO NOTHING RETURNING url",
                     url
-                )
-            # Always publish to scraper queue; dedup handled by ScraperWorker
-            try:
-                await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                    aio_pika.Message(url.encode()),
-                    routing_key=settings.scraper_queue
-                )
-            except Exception as e:
-                logger.error(f"Error publishing URL to scraper_queue: {e}")
+                ) is not None
+
+            if inserted:
+                try:
+                    await db_manager.get_rabbitmq_channel().default_exchange.publish(
+                        aio_pika.Message(url.encode()),
+                        routing_key=settings.scraper_queue
+                    )
+                except Exception as e:
+                    logger.error(f"Error publishing URL to scraper_queue: {e}")
         except Exception as e:
             logger.error(f"Error inserting URL: {e}")
 

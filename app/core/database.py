@@ -94,5 +94,8 @@ class DatabaseManager:
     def get_rabbitmq_channel(self) -> Optional[aio_pika.Channel]:
         return self.rabbitmq_channel
 
+    def get_rabbitmq_connection(self) -> Optional[aio_pika.Connection]:
+        return self.rabbitmq_connection
+
 # Global database manager instance
 db_manager = DatabaseManager()
