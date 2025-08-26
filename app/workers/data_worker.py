@@ -48,6 +48,11 @@ class DataWorker:
     async def insert_data(self, data: Dict):
         # Inline the existing logic from app/core/workers.py::DataWorker.insert_data
         try:
+            # Skip records without a valid origin_url
+            origin_url = data.get('origin_url')
+            if not origin_url or (isinstance(origin_url, str) and origin_url.strip() == ""):
+                logger.warning("Skipping insert: origin_url is missing or empty for ID %s", data.get('id'))
+                return
             async with db_manager.get_data_pool().acquire() as conn:
                 async with conn.transaction():
                     logger.info(f"Processing data for ID: {data.get('id')}")
