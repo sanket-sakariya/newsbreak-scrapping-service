@@ -82,7 +82,7 @@ class UrlFeeder:
                 for url_row in urls:
                     try:
                         await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                            aio_pika.Message(url_row["url"].encode()),
+                            aio_pika.Message(url_row["url"].encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                             routing_key=settings.scraper_queue
                         )
                         urls_added += 1
@@ -138,7 +138,7 @@ class UrlFeeder:
                 for url in urls_to_queue:
                     try:
                         await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                            aio_pika.Message(url.encode()),
+                            aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                             routing_key=settings.scraper_queue
                         )
                         queued_count += 1
@@ -182,7 +182,7 @@ class UrlFeeder:
             for url in categories:
                 try:
                     await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                        aio_pika.Message(url.encode()),
+                        aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                         routing_key=settings.scraper_queue
                     )
                     queued += 1

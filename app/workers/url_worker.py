@@ -144,7 +144,7 @@ class UrlWorker:
                 for u in inserted_urls:
                     try:
                         await channel.default_exchange.publish(
-                            aio_pika.Message(u.encode()),
+                            aio_pika.Message(u.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                             routing_key=settings.scraper_queue
                         )
                     except Exception as e:

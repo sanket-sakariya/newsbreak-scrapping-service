@@ -53,7 +53,7 @@ class ScraperEndpoint:
             # Add initial URLs to scraper queue
             for url in request.initial_urls:
                 await rabbitmq_channel.default_exchange.publish(
-                    aio_pika.Message(str(url).encode()),
+                    aio_pika.Message(str(url).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                     routing_key=settings.scraper_queue
                 )
             

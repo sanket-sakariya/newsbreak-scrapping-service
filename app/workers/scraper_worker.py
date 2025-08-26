@@ -176,7 +176,7 @@ class ScraperWorker:
                     try:
                         if await self.check_deduplication(url):
                             await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                                aio_pika.Message(url.encode()),
+                                aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                                 routing_key=settings.newsbreak_urls_queue
                             )
                     except Exception as e:
@@ -185,7 +185,7 @@ class ScraperWorker:
 
             if data:
                 await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                    aio_pika.Message(json.dumps(data).encode()),
+                    aio_pika.Message(json.dumps(data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                     routing_key=settings.newsbreak_data_queue
                 )
                 logger.debug(f"Sent data for ID {data.get('id')} to data queue")
@@ -212,7 +212,7 @@ class ScraperWorker:
         try:
             message_data = {'url': url, 'error': error, 'timestamp': datetime.utcnow().isoformat(), 'worker_number': self.worker_number}
             await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                aio_pika.Message(json.dumps(message_data).encode()),
+                aio_pika.Message(json.dumps(message_data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                 routing_key=settings.dlx_queue
             )
         except Exception as e:
