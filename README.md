@@ -32,6 +32,20 @@ The system follows a microservices architecture with the following components:
 6. Failed URLs → DLX Queue → Retry Mechanism
 ```
 
+## Domain Extraction
+
+The system automatically extracts domain names from URLs using the following logic:
+
+1. **Remove Protocol**: Strip `http://` or `https://` from the URL
+2. **Remove www**: Remove `www.` prefix if present
+3. **Extract Domain**: Take only the domain part (remove path, query parameters, etc.)
+4. **Ensure Uniqueness**: Each domain is stored only once in the `domain_data` table
+
+**Examples:**
+- `https://www.newsbreak.com/article/123` → `newsbreak.com`
+- `http://example.com/path?param=value` → `example.com`
+- `https://subdomain.example.com:8080/api` → `subdomain.example.com`
+
 ## Database Structure
 
 ### NewsBreak URLs Database
@@ -41,6 +55,7 @@ The system follows a microservices architecture with the following components:
 - **newsbreak_data**: Main data table with scraped content
 - **source_data**: News sources
 - **city_data**: Geographic locations
+- **domain_data**: Unique domain names extracted from URLs
 - **text_category_data**: Content categorization
 - **nf_entities_data**: Named entities
 - **nf_tags_data**: Content tags

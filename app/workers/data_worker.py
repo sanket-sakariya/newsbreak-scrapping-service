@@ -4,6 +4,7 @@ import logging
 from typing import Optional, Dict, Tuple, List
 from app.core.config import settings
 from app.core.database import db_manager
+from app.core.utils import extract_domain_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -63,18 +64,20 @@ class DataWorker:
                     logger.info(f"  Third: ID={third_cat_id}, value={third_cat_value}")
                     entities_id, entities_value = await self.process_entities(conn, data.get('nf_entities', {}))
                     tags_id = await self.process_tags(conn, data.get('nf_tags', []))
+                    domain_id = await self.get_or_create_domain(conn, data.get('origin_url'))
                     await conn.execute(
                         """
                         INSERT INTO newsbreak_data (
-                            id, likeCount, commentCount, source_id, city_id, title, origin_url, share_count,
+                            id, likeCount, commentCount, source_id, city_id, title, origin_url, domain_id, share_count,
                             first_text_category_id, second_text_category_id, third_text_category_id,
                             first_text_category_value, second_text_category_value, third_text_category_value,
                             nf_entities_id, nf_entities_value, nf_tags_id, status
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                         ON CONFLICT (id) DO UPDATE SET
                             likeCount = EXCLUDED.likeCount,
                             commentCount = EXCLUDED.commentCount,
                             share_count = EXCLUDED.share_count,
+                            domain_id = EXCLUDED.domain_id,
                             first_text_category_id = EXCLUDED.first_text_category_id,
                             second_text_category_id = EXCLUDED.second_text_category_id,
                             third_text_category_id = EXCLUDED.third_text_category_id,
@@ -87,7 +90,7 @@ class DataWorker:
                             updated_at = CURRENT_TIMESTAMP
                         """,
                         data.get('id'), data.get('likeCount', 0), data.get('commentCount', 0),
-                        source_id, city_id, data.get('title'), data.get('origin_url'), data.get('share_count', 0),
+                        source_id, city_id, data.get('title'), data.get('origin_url'), domain_id, data.get('share_count', 0),
                         first_cat_id, second_cat_id, third_cat_id,
                         first_cat_value, second_cat_value, third_cat_value,
                         entities_id, entities_value, tags_id,
@@ -112,6 +115,17 @@ class DataWorker:
         if result:
             return result
         return await conn.fetchval("INSERT INTO city_data (city_name) VALUES ($1) RETURNING city_id", city_name)
+
+    async def get_or_create_domain(self, conn, url: str) -> Optional[int]:
+        if not url:
+            return None
+        domain = extract_domain_from_url(url)
+        if not domain:
+            return None
+        result = await conn.fetchval("SELECT domain_id FROM domain_data WHERE domain_name = $1", domain)
+        if result:
+            return result
+        return await conn.fetchval("INSERT INTO domain_data (domain_name) VALUES ($1) RETURNING domain_id", domain)
 
     async def process_category(self, conn, category: Dict) -> Tuple[Optional[int], Optional[float]]:
         if not category or not isinstance(category, dict):

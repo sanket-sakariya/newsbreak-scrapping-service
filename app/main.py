@@ -85,6 +85,14 @@ async def setup_database():
             """)
             
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS domain_data (
+                    domain_id SERIAL PRIMARY KEY,
+                    domain_name VARCHAR(255) UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS newsbreak_data (
                     id VARCHAR(255) PRIMARY KEY,
                     likeCount INTEGER,
@@ -93,6 +101,7 @@ async def setup_database():
                     city_id INTEGER REFERENCES city_data(city_id),
                     title TEXT,
                     origin_url TEXT,
+                    domain_id INTEGER REFERENCES domain_data(domain_id),
                     share_count INTEGER,
                     first_text_category_id INTEGER REFERENCES text_category_data(text_category_id),
                     second_text_category_id INTEGER REFERENCES text_category_data(text_category_id),
@@ -113,6 +122,7 @@ async def setup_database():
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_created_at ON newsbreak_data(created_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_status ON newsbreak_data(status)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_domain_id ON newsbreak_data(domain_id)")
 
         async with url_pool.acquire() as conn:
             # Create URLs table

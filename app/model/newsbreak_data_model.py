@@ -32,6 +32,12 @@ class NfTagsDataModel(BaseModel):
     nf_tags_id = Column(Integer, primary_key=True, autoincrement=True)
     tag_name = Column(String(255), unique=True, nullable=False)
 
+class DomainDataModel(BaseModel):
+    __tablename__ = "domain_data"
+    
+    domain_id = Column(Integer, primary_key=True, autoincrement=True)
+    domain_name = Column(String(255), unique=True, nullable=False)
+
 class NewsbreakDataModel(BaseModel):
     __tablename__ = "newsbreak_data"
     
@@ -42,6 +48,7 @@ class NewsbreakDataModel(BaseModel):
     city_id = Column(Integer, ForeignKey("city_data.city_id"))
     title = Column(Text)
     origin_url = Column(Text)
+    domain_id = Column(Integer, ForeignKey("domain_data.domain_id"))
     share_count = Column(Integer)
     first_text_category_id = Column(Integer, ForeignKey("text_category_data.text_category_id"))
     second_text_category_id = Column(Integer, ForeignKey("text_category_data.text_category_id"))
@@ -58,6 +65,7 @@ class NewsbreakDataModel(BaseModel):
     # Relationships
     source = relationship("SourceDataModel")
     city = relationship("CityDataModel")
+    domain = relationship("DomainDataModel")
     first_text_category = relationship("TextCategoryDataModel", foreign_keys=[first_text_category_id])
     second_text_category = relationship("TextCategoryDataModel", foreign_keys=[second_text_category_id])
     third_text_category = relationship("TextCategoryDataModel", foreign_keys=[third_text_category_id])
