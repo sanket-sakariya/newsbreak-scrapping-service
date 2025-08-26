@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     
     # Worker settings
     default_batch_size: int = 100
+    data_worker_concurrency: int = 5
+    batch_flush_seconds: int = 5
+    data_worker_concurrency: int = 5
     default_worker_count: int = 5
     worker_timeout: int = 30
     

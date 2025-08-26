@@ -1,6 +1,7 @@
 import aio_pika
 import json
 import logging
+import asyncio
 from typing import Optional, Dict, Tuple, List
 from app.core.config import settings
 from app.core.database import db_manager
@@ -13,6 +14,8 @@ class DataWorker:
     def __init__(self):
         self.is_running = False
         self.processed_count = 0
+        self._sem = asyncio.Semaphore(getattr(settings, 'data_worker_concurrency', 5))
+        self._pending: set[asyncio.Task] = set()
 
     async def start(self):
         self.is_running = True
@@ -21,6 +24,12 @@ class DataWorker:
 
     async def stop(self):
         self.is_running = False
+        # Wait for in-flight tasks to complete gracefully
+        try:
+            if self._pending:
+                await asyncio.gather(*self._pending, return_exceptions=True)
+        except Exception:
+            pass
         logger.info(f"Data worker stopped. Processed {self.processed_count} records")
 
     async def consume_data_queue(self):
@@ -33,17 +42,27 @@ class DataWorker:
                 async for message in queue_iter:
                     if not self.is_running:
                         break
-                    try:
-                        data = json.loads(message.body.decode())
-                        await self.insert_data(data)
-                        await message.ack()
-                        self.processed_count += 1
-                        logger.debug(f"Data worker processed record ID: {data.get('id')}")
-                    except Exception as e:
-                        logger.error(f"Error processing data message: {e}")
-                        await message.nack(requeue=False)
+                    # Process concurrently with bounded concurrency
+                    task = asyncio.create_task(self._handle_message(message))
+                    self._pending.add(task)
+                    task.add_done_callback(self._pending.discard)
         except Exception as e:
             logger.error(f"Data worker error: {e}")
+
+    async def _handle_message(self, message: aio_pika.IncomingMessage):
+        async with self._sem:
+            try:
+                data = json.loads(message.body.decode())
+                await self.insert_data(data)
+                await message.ack()
+                self.processed_count += 1
+                logger.debug(f"Data worker processed record ID: {data.get('id')}")
+            except Exception as e:
+                logger.error(f"Error processing data message: {e}")
+                try:
+                    await message.nack(requeue=False)
+                except Exception:
+                    pass
 
     async def insert_data(self, data: Dict):
         # Inline the existing logic from app/core/workers.py::DataWorker.insert_data
