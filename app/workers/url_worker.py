@@ -1,7 +1,8 @@
 import aio_pika
 import logging
 import asyncio
-from typing import List
+import json
+from typing import List, Tuple, Optional
 from app.core.config import settings
 from app.core.database import db_manager
 
@@ -52,12 +53,12 @@ class UrlWorker:
                     pass
             async with self._lock:
                 if self._buffer:
-                    urls, msgs = self._buffer[:], self._buffer_msgs[:]
+                    url_data, msgs = self._buffer[:], self._buffer_msgs[:]
                     self._buffer.clear(); self._buffer_msgs.clear()
                 else:
-                    urls, msgs = [], []
-            if urls:
-                await self._insert_and_publish_batch(urls, msgs)
+                    url_data, msgs = [], []
+            if url_data:
+                await self._insert_and_publish_batch(url_data, msgs)
         except Exception as e:
             logger.error(f"Error flushing URL batch on stop: {e}")
         if self._channel and not self._channel.is_closed:
@@ -81,19 +82,30 @@ class UrlWorker:
                         break
                     
                     try:
-                        url = message.body.decode()
+                        message_body = message.body.decode()
+                        
+                        # Try to parse as JSON (for 4xx error messages) or plain URL
+                        try:
+                            message_data = json.loads(message_body)
+                            url = message_data.get('url', message_body)
+                            status_code = message_data.get('status_code')
+                        except json.JSONDecodeError:
+                            # Plain URL message
+                            url = message_body
+                            status_code = None
+                        
                         # Buffer for batch insert
                         async with self._lock:
-                            self._buffer.append(url)
+                            self._buffer.append((url, status_code))  # Store URL with status code
                             self._buffer_msgs.append(message)
                             should_flush = len(self._buffer) >= self._batch_size
                         if should_flush:
                             # Snapshot outside lock
                             async with self._lock:
-                                urls = self._buffer[:]
+                                url_data = self._buffer[:]
                                 msgs = self._buffer_msgs[:]
                                 self._buffer.clear(); self._buffer_msgs.clear()
-                            await self._insert_and_publish_batch(urls, msgs)
+                            await self._insert_and_publish_batch(url_data, msgs)
                         
                     except Exception as e:
                         logger.error(f"Error processing URL message: {e}")
@@ -118,12 +130,14 @@ class UrlWorker:
         except Exception as e:
             logger.error(f"Error inserting URL: {e}")
 
-    async def _insert_and_publish_batch(self, urls: List[str], messages: List[aio_pika.IncomingMessage]):
-        """Batch insert URLs; publish only newly inserted; ack all messages on success."""
-        if not urls:
+    async def _insert_and_publish_batch(self, url_data: List[Tuple[str, Optional[int]]], messages: List[aio_pika.IncomingMessage]):
+        """Batch insert URLs; publish only newly inserted (non-4xx); ack all messages on success."""
+        if not url_data:
             return
         try:
             async with db_manager.get_url_pool().acquire() as conn:
+                # Extract URLs for deduplication and insertion
+                urls = [item[0] for item in url_data]
                 # Deduplicate in-memory first to reduce DB work
                 unique_urls = list(dict.fromkeys(urls))
                 # Insert all with a single statement; RETURNING gives only newly inserted
@@ -138,13 +152,24 @@ class UrlWorker:
                 )
                 inserted_urls = [r['url'] for r in rows]
 
-            # Publish only newly inserted URLs
+            # Publish only newly inserted URLs that don't have 4xx status codes
             if inserted_urls:
                 channel = self._channel or db_manager.get_rabbitmq_channel()
-                for u in inserted_urls:
+                
+                # Create a mapping of URLs to their status codes
+                url_status_map = {item[0]: item[1] for item in url_data}
+                
+                for url in inserted_urls:
+                    status_code = url_status_map.get(url)
+                    
+                    # Skip URLs with 4xx status codes
+                    if status_code and 400 <= status_code < 500:
+                        logger.info(f"Skipping 4xx URL from scraper_queue: {url} (status: {status_code})")
+                        continue
+                    
                     try:
                         await channel.default_exchange.publish(
-                            aio_pika.Message(u.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
+                            aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                             routing_key=settings.scraper_queue
                         )
                     except Exception as e:
@@ -170,11 +195,11 @@ class UrlWorker:
                 async with self._lock:
                     if not self._buffer:
                         continue
-                    urls = self._buffer[:]
+                    url_data = self._buffer[:]
                     msgs = self._buffer_msgs[:]
                     self._buffer.clear(); self._buffer_msgs.clear()
                 try:
-                    await self._insert_and_publish_batch(urls, msgs)
+                    await self._insert_and_publish_batch(url_data, msgs)
                 except Exception as e:
                     logger.error(f"Periodic URL flush failed: {e}")
         except asyncio.CancelledError:

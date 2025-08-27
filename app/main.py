@@ -3,12 +3,18 @@ from contextlib import asynccontextmanager
 import asyncio
 from app.core.database import db_manager
 from app.workers import data_worker, url_worker, url_feeder
+from app.workers.dlx_retry_worker import DLXRetryWorker
 from app.core.config import settings
 from app.api.v1.router import api_router
 from app.core.logging import logger
 
+# Global worker instances
+dlx_retry_worker = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global dlx_retry_worker
+    
     # Startup
     logger.info("Starting NewsBreak Scraper API...")
     
@@ -24,6 +30,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(url_worker.start())
     asyncio.create_task(url_feeder.start())
     
+    # Start DLX retry worker
+    dlx_retry_worker = DLXRetryWorker(retry_delay=300)  # 5 minutes delay
+    asyncio.create_task(dlx_retry_worker.start())
+    
     logger.info("NewsBreak Scraper API started successfully")
     
     yield
@@ -35,6 +45,8 @@ async def lifespan(app: FastAPI):
     await data_worker.stop()
     await url_worker.stop()
     await url_feeder.stop()
+    if dlx_retry_worker:
+        await dlx_retry_worker.stop()
     
     # Cleanup connections
     await db_manager.cleanup_connections()

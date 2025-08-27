@@ -13,6 +13,13 @@ from app.core.database import db_manager
 logger = logging.getLogger(__name__)
 
 
+class HTTPError(Exception):
+    """Custom HTTP error with status code"""
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class ScraperWorker:
     def __init__(self, worker_number: int, batch_size: int = 100):
         self.worker_number = worker_number
@@ -55,8 +62,23 @@ class ScraperWorker:
                         break
 
                     try:
-                        url = message.body.decode()
-                        logger.info(f"Worker {self.worker_number} processing URL: {url}")
+                        # Try to parse as JSON (for retry messages) or plain URL
+                        message_body = message.body.decode()
+                        retry_count = 0
+                        
+                        try:
+                            # Check if it's a retry message with JSON data
+                            message_data = json.loads(message_body)
+                            url = message_data.get('url', message_body)
+                            retry_count = message_data.get('retry_count', 0)
+                            if retry_count > 0:
+                                logger.info(f"Worker {self.worker_number} processing retry URL: {url} (attempt {retry_count}/3)")
+                            else:
+                                logger.info(f"Worker {self.worker_number} processing URL: {url}")
+                        except json.JSONDecodeError:
+                            # Plain URL message (not a retry)
+                            url = message_body
+                            logger.info(f"Worker {self.worker_number} processing URL: {url}")
 
                         result = await self.scrape_url(url)
                         if result:
@@ -69,10 +91,23 @@ class ScraperWorker:
                         await message.ack()
                         await asyncio.sleep(1)
 
+                    except HTTPError as e:
+                        # Handle HTTP errors based on status code
+                        if 500 <= e.status_code < 600:
+                            # 5xx errors (server errors) - send to DLX for retry
+                            logger.warning(f"Worker {self.worker_number} server error {e.status_code} for URL: {url}")
+                            await message.nack(requeue=False)
+                            await self.send_to_dlx(url, str(e), retry_count)
+                        else:
+                            # 4xx errors (client errors) - send to urls_queue with status code
+                            logger.info(f"Worker {self.worker_number} client error {e.status_code} for URL: {url} - sending to urls_queue")
+                            await self.send_4xx_to_urls_queue(url, e.status_code)
+                            await message.ack()  # Acknowledge to remove from queue
                     except Exception as e:
+                        # Other errors (network, parsing, etc.) - send to DLX
                         logger.error(f"Worker {self.worker_number} error processing message: {e}")
                         await message.nack(requeue=False)
-                        await self.send_to_dlx(url, str(e))
+                        await self.send_to_dlx(url, str(e), retry_count)
 
         except Exception as e:
             logger.error(f"Worker {self.worker_number} consume error: {e}")
@@ -82,7 +117,8 @@ class ScraperWorker:
             logger.debug(f"Scraping URL: {url}")
             async with self.session.get(url) as response:
                 if response.status != 200:
-                    raise Exception(f"HTTP {response.status}")
+                    # Create custom exception with status code for proper error handling
+                    raise HTTPError(f"HTTP {response.status}", response.status)
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 extracted_urls = self.extract_urls(soup, url)
@@ -91,6 +127,9 @@ class ScraperWorker:
                     extracted_data = self.extract_next_data(soup, html)
                 logger.debug(f"Extracted {len(extracted_urls)} URLs and {'data' if extracted_data else 'no data'} from {url}")
                 return extracted_urls, extracted_data
+        except HTTPError:
+            # Re-raise HTTPError to preserve status code
+            raise
         except Exception as e:
             logger.error(f"Failed to scrape {url}: {e}")
             raise
@@ -252,13 +291,37 @@ class ScraperWorker:
 
     # Removed DB timestamp updates per request; scraper worker remains read-only
 
-    async def send_to_dlx(self, url: str, error: str):
+    async def send_4xx_to_urls_queue(self, url: str, status_code: int):
+        """Send 4xx error URLs to urls_queue with status code for storage without scraping"""
         try:
-            message_data = {'url': url, 'error': error, 'timestamp': datetime.utcnow().isoformat(), 'worker_number': self.worker_number}
+            message_data = {
+                'url': url,
+                'status_code': status_code,
+                'timestamp': datetime.utcnow().isoformat(),
+                'worker_number': self.worker_number
+            }
+            await db_manager.get_rabbitmq_channel().default_exchange.publish(
+                aio_pika.Message(json.dumps(message_data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
+                routing_key=settings.newsbreak_urls_queue
+            )
+            logger.info(f"Sent 4xx URL {url} (status: {status_code}) to urls_queue")
+        except Exception as e:
+            logger.error(f"Error sending 4xx URL to urls_queue: {e}")
+
+    async def send_to_dlx(self, url: str, error: str, retry_count: int = 0):
+        try:
+            message_data = {
+                'url': url, 
+                'error': error, 
+                'retry_count': retry_count,
+                'timestamp': datetime.utcnow().isoformat(), 
+                'worker_number': self.worker_number
+            }
             await db_manager.get_rabbitmq_channel().default_exchange.publish(
                 aio_pika.Message(json.dumps(message_data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                 routing_key=settings.dlx_queue
             )
+            logger.info(f"Sent URL {url} to DLX (retry count: {retry_count})")
         except Exception as e:
             logger.error(f"Error sending to DLX: {e}")
 
