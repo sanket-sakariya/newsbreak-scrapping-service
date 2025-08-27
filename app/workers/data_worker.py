@@ -2,6 +2,7 @@ import aio_pika
 import json
 import logging
 import asyncio
+from datetime import datetime
 from typing import Optional, Dict, Tuple, List
 from app.core.config import settings
 from app.core.database import db_manager
@@ -56,7 +57,9 @@ class DataWorker:
                 await self.insert_data(data)
                 await message.ack()
                 self.processed_count += 1
-                logger.debug(f"Data worker processed record ID: {data.get('id')}")
+                # Log progress every 100 records instead of every record
+                if self.processed_count % 100 == 0:
+                    logger.info(f"Data worker processed {self.processed_count} records")
             except Exception as e:
                 logger.error(f"Error processing data message: {e}")
                 try:
@@ -74,29 +77,34 @@ class DataWorker:
                 return
             async with db_manager.get_data_pool().acquire() as conn:
                 async with conn.transaction():
-                    logger.info(f"Processing data for ID: {data.get('id')}")
+                    logger.debug(f"Processing data for ID: {data.get('id')}")  # Changed to debug
                     source_id = await self.get_or_create_source(conn, data.get('source'))
                     city_id = await self.get_or_create_city(conn, data.get('cityName'))
                     text_category = data.get('text_category', {})
-                    logger.info(f"Raw text_category data: {text_category}")
+                    logger.debug(f"Raw text_category data: {text_category}")  # Changed to debug
                     first_cat_id, first_cat_value = await self.process_category(conn, text_category.get('first_cat', {}))
                     second_cat_id, second_cat_value = await self.process_category(conn, text_category.get('second_cat', {}))
                     third_cat_id, third_cat_value = await self.process_category(conn, text_category.get('third_cat', {}))
-                    logger.info(f"Processed categories:")
-                    logger.info(f"  First: ID={first_cat_id}, value={first_cat_value}")
-                    logger.info(f"  Second: ID={second_cat_id}, value={second_cat_value}")
-                    logger.info(f"  Third: ID={third_cat_id}, value={third_cat_value}")
+                    logger.debug(f"Processed categories:")  # Changed to debug
+                    logger.debug(f"  First: ID={first_cat_id}, value={first_cat_value}")  # Changed to debug
+                    logger.debug(f"  Second: ID={second_cat_id}, value={second_cat_value}")  # Changed to debug
+                    logger.debug(f"  Third: ID={third_cat_id}, value={third_cat_value}")  # Changed to debug
                     entities_id, entities_value = await self.process_entities(conn, data.get('nf_entities', {}))
                     tags_id = await self.process_tags(conn, data.get('nf_tags', []))
                     domain_id = await self.get_or_create_domain(conn, data.get('origin_url'))
+                    
+                    # Process new fields
+                    date_value = self.parse_date(data.get('date'))
+                    wordcount = data.get('wordcount') if data.get('wordcount') is not None else None
+                    images = data.get('images')
                     await conn.execute(
                         """
                         INSERT INTO newsbreak_data (
                             id, likeCount, commentCount, source_id, city_id, title, origin_url, domain_id, share_count,
                             first_text_category_id, second_text_category_id, third_text_category_id,
                             first_text_category_value, second_text_category_value, third_text_category_value,
-                            nf_entities_id, nf_entities_value, nf_tags_id, status
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                            nf_entities_id, nf_entities_value, nf_tags_id, date, wordcount, images, status
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
                         ON CONFLICT (id) DO UPDATE SET
                             likeCount = EXCLUDED.likeCount,
                             commentCount = EXCLUDED.commentCount,
@@ -111,6 +119,9 @@ class DataWorker:
                             nf_entities_id = EXCLUDED.nf_entities_id,
                             nf_entities_value = EXCLUDED.nf_entities_value,
                             nf_tags_id = EXCLUDED.nf_tags_id,
+                            date = EXCLUDED.date,
+                            wordcount = EXCLUDED.wordcount,
+                            images = EXCLUDED.images,
                             updated_at = CURRENT_TIMESTAMP
                         """,
                         data.get('id'), data.get('likeCount', 0), data.get('commentCount', 0),
@@ -118,6 +129,7 @@ class DataWorker:
                         first_cat_id, second_cat_id, third_cat_id,
                         first_cat_value, second_cat_value, third_cat_value,
                         entities_id, entities_value, tags_id,
+                        date_value, wordcount, images,
                         'created'
                     )
         except Exception as e:
@@ -219,6 +231,50 @@ class DataWorker:
         except (IndexError, KeyError) as e:
             logger.error(f"Error processing tags {tags_data}: {e}")
             return None
+
+    def parse_date(self, date_value) -> Optional[datetime]:
+        """Parse date string to full datetime object with time"""
+        if not date_value:
+            return None
+        
+        try:
+            # Handle different date formats
+            if isinstance(date_value, str):
+                # Try common datetime formats (with time)
+                datetime_formats = [
+                    '%Y-%m-%dT%H:%M:%S',
+                    '%Y-%m-%dT%H:%M:%S.%f',
+                    '%Y-%m-%dT%H:%M:%SZ',
+                    '%Y-%m-%dT%H:%M:%S.%fZ',
+                    '%Y-%m-%d %H:%M:%S',
+                    '%Y-%m-%d %H:%M:%S.%f',
+                    '%m/%d/%Y %H:%M:%S',
+                    '%d/%m/%Y %H:%M:%S',
+                    '%Y-%m-%d'  # Date only - will add default time
+                ]
+                
+                for fmt in datetime_formats:
+                    try:
+                        parsed_datetime = datetime.strptime(date_value, fmt)
+                        return parsed_datetime
+                    except ValueError:
+                        continue
+                
+                # If none work, try to parse as timestamp
+                try:
+                    timestamp = float(date_value)
+                    return datetime.fromtimestamp(timestamp)
+                except (ValueError, OSError):
+                    pass
+                    
+            elif isinstance(date_value, (int, float)):
+                # Assume it's a timestamp
+                return datetime.fromtimestamp(date_value)
+                
+        except Exception as e:
+            logger.warning(f"Failed to parse date '{date_value}': {e}")
+        
+        return None
 
 
 

@@ -16,25 +16,25 @@ class DatabaseManager:
     async def initialize_connections(self):
         """Initialize database and RabbitMQ connections"""
         try:
-            # Initialize PostgreSQL connection pools
+            # Initialize PostgreSQL connection pools (increased for higher concurrency)
             self.data_pool = await asyncpg.create_pool(
                 settings.database_url_1, 
-                min_size=5, 
-                max_size=20
+                min_size=10, 
+                max_size=50  # Increased from 20 to 50
             )
             logger.info("Database connection pool initialized for data")
             
             self.url_pool = await asyncpg.create_pool(
                 settings.database_url_2, 
                 min_size=5, 
-                max_size=20
+                max_size=25  # Increased from 20 to 25
             )
             logger.info("Database connection pool initialized for URLs")
             
             # Initialize RabbitMQ connection
             self.rabbitmq_connection = await aio_pika.connect_robust(settings.rabbitmq_url)
             self.rabbitmq_channel = await self.rabbitmq_connection.channel()
-            await self.rabbitmq_channel.set_qos(prefetch_count=10)
+            await self.rabbitmq_channel.set_qos(prefetch_count=settings.data_worker_concurrency)
             logger.info("RabbitMQ connection initialized")
             
         except Exception as e:

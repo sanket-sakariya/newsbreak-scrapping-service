@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, Float, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -59,6 +59,9 @@ class NewsbreakDataModel(BaseModel):
     nf_entities_id = Column(Integer, ForeignKey("nf_entities_data.nf_entities_id"))
     nf_entities_value = Column(Float)
     nf_tags_id = Column(Integer, ForeignKey("nf_tags_data.nf_tags_id"))
+    date = Column(DateTime)
+    wordcount = Column(Integer)
+    images = Column(Text)
     is_active = Column(Boolean, default=True)
     status = Column(String(50), default="creating")
     

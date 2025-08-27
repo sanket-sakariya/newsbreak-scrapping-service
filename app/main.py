@@ -112,6 +112,9 @@ async def setup_database():
                     nf_entities_id INTEGER REFERENCES nf_entities_data(nf_entities_id),
                     nf_entities_value FLOAT,
                     nf_tags_id INTEGER REFERENCES nf_tags_data(nf_tags_id),
+                    date TIMESTAMP,
+                    wordcount INTEGER,
+                    images TEXT,
                     is_active BOOLEAN DEFAULT TRUE,
                     status VARCHAR(50) DEFAULT 'creating',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -119,10 +122,20 @@ async def setup_database():
                 )
             """)
             
+            # Add missing columns if they don't exist (for existing tables)
+            try:
+                await conn.execute("ALTER TABLE newsbreak_data ADD COLUMN IF NOT EXISTS date TIMESTAMP")
+                await conn.execute("ALTER TABLE newsbreak_data ADD COLUMN IF NOT EXISTS wordcount INTEGER")
+                await conn.execute("ALTER TABLE newsbreak_data ADD COLUMN IF NOT EXISTS images TEXT")
+                logger.info("Added missing columns to newsbreak_data table")
+            except Exception as e:
+                logger.info(f"Columns may already exist or error adding them: {e}")
+            
             # Create indexes
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_created_at ON newsbreak_data(created_at)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_status ON newsbreak_data(status)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_domain_id ON newsbreak_data(domain_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_newsbreak_data_date ON newsbreak_data(date)")
 
         async with url_pool.acquire() as conn:
             # Create URLs table

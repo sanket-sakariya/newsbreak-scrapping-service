@@ -88,7 +88,7 @@ class ScraperWorker:
                 extracted_urls = self.extract_urls(soup, url)
                 extracted_data = None
                 if self.should_extract_data(url):
-                    extracted_data = self.extract_next_data(soup)
+                    extracted_data = self.extract_next_data(soup, html)
                 logger.debug(f"Extracted {len(extracted_urls)} URLs and {'data' if extracted_data else 'no data'} from {url}")
                 return extracted_urls, extracted_data
         except Exception as e:
@@ -127,7 +127,7 @@ class ScraperWorker:
             logger.error(f"Error extracting URLs: {e}")
             return []
 
-    def extract_next_data(self, soup: BeautifulSoup) -> Optional[Dict]:
+    def extract_next_data(self, soup: BeautifulSoup, html: str) -> Optional[Dict]:
         try:
             script_tag = soup.find('script', {'id': '__NEXT_DATA__'})
             if not script_tag:
@@ -140,6 +140,14 @@ class ScraperWorker:
             if not article_id:
                 logger.debug("No article ID found in data")
                 return None
+            
+            # Extract additional fields
+            date = doc_info.get('date') or doc_info.get('publishDate') or doc_info.get('publish_date')
+            wordcount = self._safe_int(doc_info.get('wordcount') or doc_info.get('word_count'))
+            
+            # Extract image using the DOM selector approach
+            images = self.extract_images_from_html(html)
+            
             extracted_data = {
                 "id": str(article_id),
                 "title": doc_info.get('title') or doc_info.get('headline'),
@@ -151,7 +159,10 @@ class ScraperWorker:
                 "origin_url": doc_info.get('origin_url') or doc_info.get('original_url'),
                 "text_category": doc_info.get('text_category', {}),
                 "nf_entities": doc_info.get('nf_entities', {}),
-                "nf_tags": doc_info.get('nf_tags', [])
+                "nf_tags": doc_info.get('nf_tags', []),
+                "date": date,
+                "wordcount": wordcount,
+                "images": images
             }
             return extracted_data
         except json.JSONDecodeError as e:
@@ -166,6 +177,39 @@ class ScraperWorker:
             return int(value) if value is not None else 0
         except (TypeError, ValueError):
             return 0
+    
+    def _safe_bool(self, value) -> Optional[bool]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
+        except (TypeError, ValueError):
+            return None
+    
+    def extract_images_from_html(self, html: str) -> Optional[str]:
+        """Extract image using DOM selector approach similar to browser JS"""
+        try:
+            # Parse HTML and find images with the specific pattern
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Find all images with src containing the pattern
+            img_tags = soup.find_all('img', src=lambda x: x and 'https://img.particlenews.com/' in x)
+            
+            if len(img_tags) >= 2:
+                # Get the second image (index 1) as specified
+                return img_tags[1].get('src')
+            elif len(img_tags) == 1:
+                # If only one image, return it
+                return img_tags[0].get('src')
+            else:
+                return None
+        except Exception as e:
+            logger.error(f"Error extracting images: {e}")
+            return None
 
     async def handle_extracted_data(self, urls: List[str], data: Optional[Dict]):
         try:
