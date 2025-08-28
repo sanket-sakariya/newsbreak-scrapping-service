@@ -139,18 +139,28 @@ class DataWorker:
     async def get_or_create_source(self, conn, source_name: str) -> Optional[int]:
         if not source_name:
             return None
-        result = await conn.fetchval("SELECT source_id FROM source_data WHERE source_name = $1", source_name)
-        if result:
-            return result
-        return await conn.fetchval("INSERT INTO source_data (source_name) VALUES ($1) RETURNING source_id", source_name)
+        # Use INSERT with ON CONFLICT to handle race conditions atomically
+        return await conn.fetchval(
+            """
+            INSERT INTO source_data (source_name) VALUES ($1)
+            ON CONFLICT (source_name) DO UPDATE SET source_name = EXCLUDED.source_name
+            RETURNING source_id
+            """, 
+            source_name
+        )
 
     async def get_or_create_city(self, conn, city_name: str) -> Optional[int]:
         if not city_name:
             return None
-        result = await conn.fetchval("SELECT city_id FROM city_data WHERE city_name = $1", city_name)
-        if result:
-            return result
-        return await conn.fetchval("INSERT INTO city_data (city_name) VALUES ($1) RETURNING city_id", city_name)
+        # Use INSERT with ON CONFLICT to handle race conditions atomically
+        return await conn.fetchval(
+            """
+            INSERT INTO city_data (city_name) VALUES ($1)
+            ON CONFLICT (city_name) DO UPDATE SET city_name = EXCLUDED.city_name
+            RETURNING city_id
+            """, 
+            city_name
+        )
 
     async def get_or_create_domain(self, conn, url: str) -> Optional[int]:
         if not url:
@@ -158,10 +168,15 @@ class DataWorker:
         domain = extract_domain_from_url(url)
         if not domain:
             return None
-        result = await conn.fetchval("SELECT domain_id FROM domain_data WHERE domain_name = $1", domain)
-        if result:
-            return result
-        return await conn.fetchval("INSERT INTO domain_data (domain_name) VALUES ($1) RETURNING domain_id", domain)
+        # Use INSERT with ON CONFLICT to handle race conditions atomically
+        return await conn.fetchval(
+            """
+            INSERT INTO domain_data (domain_name) VALUES ($1)
+            ON CONFLICT (domain_name) DO UPDATE SET domain_name = EXCLUDED.domain_name
+            RETURNING domain_id
+            """, 
+            domain
+        )
 
     async def process_category(self, conn, category: Dict) -> Tuple[Optional[int], Optional[float]]:
         if not category or not isinstance(category, dict):
