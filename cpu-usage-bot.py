@@ -59,8 +59,8 @@ class CPUMonitor:
     def get_cpu_usage(self) -> dict:
         """Get current CPU usage statistics"""
         try:
-            # Get overall CPU usage (1 second interval for accuracy)
-            overall_cpu = psutil.cpu_percent(interval=1)
+            # Get overall CPU usage (0.1 second interval for more responsive measurement)
+            overall_cpu = psutil.cpu_percent(interval=0.1)
             
             # Get per-core CPU usage
             per_core_cpu = psutil.cpu_percent(interval=0.1, percpu=True)
@@ -247,27 +247,41 @@ class CPUMonitor:
     async def check_and_alert(self):
         """Main method to check CPU usage and send alert if needed"""
         try:
-            # Get system statistics
-            cpu_stats = self.get_cpu_usage()
-            if not cpu_stats:
+            # Get system statistics with multiple samples for better accuracy
+            cpu_samples = []
+            for _ in range(3):  # Take 3 samples
+                cpu_stats = self.get_cpu_usage()
+                if cpu_stats:
+                    cpu_samples.append(cpu_stats['overall_cpu'])
+                await asyncio.sleep(0.1)  # Small delay between samples
+            
+            if not cpu_samples:
                 logging.error("Failed to get CPU statistics")
                 return
             
-            logging.info(f"Current CPU usage: {cpu_stats['overall_cpu']:.1f}%")
+            # Use the highest CPU reading from the samples
+            max_cpu = max(cpu_samples)
+            avg_cpu = sum(cpu_samples) / len(cpu_samples)
             
-            # Check if CPU usage exceeds threshold
-            if cpu_stats['overall_cpu'] >= self.threshold:
+            logging.info(f"CPU samples: {cpu_samples}, Max: {max_cpu:.1f}%, Avg: {avg_cpu:.1f}%")
+            
+            # Check if CPU usage exceeds threshold (use max value for more sensitive detection)
+            if max_cpu >= self.threshold:
                 # Check cooldown period
                 if not self.should_send_alert():
-                    logging.info(f"CPU usage high ({cpu_stats['overall_cpu']:.1f}%) but in cooldown period")
+                    logging.info(f"CPU usage high ({max_cpu:.1f}%) but in cooldown period")
                     return
                 
-                logging.warning(f"CPU usage ({cpu_stats['overall_cpu']:.1f}%) exceeds threshold ({self.threshold}%)")
+                logging.warning(f"CPU usage ({max_cpu:.1f}%) exceeds threshold ({self.threshold}%)")
                 
                 # Get additional system info
                 memory_stats = self.get_memory_usage()
                 disk_stats = self.get_disk_usage()
                 top_processes = self.get_top_processes()
+                
+                # Update cpu_stats with the max value for alert message
+                cpu_stats['overall_cpu'] = max_cpu
+                cpu_stats['timestamp'] = datetime.now()
                 
                 # Format and send alert message
                 alert_message = self.format_alert_message(cpu_stats, memory_stats, disk_stats)
@@ -285,7 +299,7 @@ class CPUMonitor:
                 else:
                     logging.error("Failed to send high CPU usage alert")
             else:
-                logging.info(f"CPU usage normal: {cpu_stats['overall_cpu']:.1f}%")
+                logging.info(f"CPU usage normal: Max {max_cpu:.1f}%, Avg {avg_cpu:.1f}%")
                 
         except Exception as e:
             logging.error(f"Error in CPU monitoring: {e}")
