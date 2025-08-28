@@ -327,7 +327,7 @@ async def main():
     # Configuration from environment variables
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    LOG_FILE = os.getenv("WORKER_LOG_FILE", "app.log")
+    LOG_FILE = os.getenv("WORKER_LOG_FILE", "~/newsbreak-scrapping-service/app.log")
     CHECK_INTERVAL = int(os.getenv("WORKER_CHECK_INTERVAL", "5"))
     
     if not BOT_TOKEN or not CHAT_ID:
@@ -338,7 +338,7 @@ async def main():
         print("3. Set environment variables:")
         print("   export TELEGRAM_BOT_TOKEN='your_bot_token'")
         print("   export TELEGRAM_CHAT_ID='your_chat_id'")
-        print("   export WORKER_LOG_FILE='app.log'  # optional, default app.log")
+        print("   export WORKER_LOG_FILE='~/newsbreak-scrapping-service/app.log'  # optional, default")
         print("   export WORKER_CHECK_INTERVAL='5'  # optional, default 5 minutes")
         print("\n4. Add to crontab:")
         print("   * * * * * /usr/bin/python3 /path/to/worker-monitor-bot.py")
@@ -356,6 +356,8 @@ async def main():
     
     # Initialize bot and monitor
     bot = TelegramBot(BOT_TOKEN, CHAT_ID)
+    # Expand ~ to home directory
+    LOG_FILE = os.path.expanduser(LOG_FILE)
     monitor = WorkerMonitor(bot, log_file=LOG_FILE, check_interval_minutes=CHECK_INTERVAL)
     
     # Run worker check
