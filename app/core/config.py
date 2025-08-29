@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     # RabbitMQ settings
     rabbitmq_url: str = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
     
+    # Redis settings
+    redis_url: str = os.getenv("REDIS_URL", "redis://:root@localhost:6379")
+    redis_host: str = os.getenv("REDIS_HOST", "localhost")
+    redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
+    redis_password: str = os.getenv("REDIS_PASSWORD", "root")
+    redis_db: int = int(os.getenv("REDIS_DB", "0"))
+    redis_cache_ttl: int = int(os.getenv("REDIS_CACHE_TTL", "3600"))  # 1 hour default
+    
     # Queue names
     scraper_queue: str = "scraper_queue"
     newsbreak_urls_queue: str = "newsbreak_urls_queue"
@@ -24,7 +32,7 @@ class Settings(BaseSettings):
     # Worker settings
     default_batch_size: int = 100
     batch_flush_seconds: int = 5
-    data_worker_concurrency: int = 20  # Increased from 5 to 20 for faster processing
+    data_worker_concurrency: int = 5  # Increased from 5 to 20 for faster processing
     default_worker_count: int = 5
     worker_timeout: int = 30
     

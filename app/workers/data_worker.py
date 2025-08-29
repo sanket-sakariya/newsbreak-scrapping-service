@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Optional, Dict, Tuple, List
 from app.core.config import settings
 from app.core.database import db_manager
+from app.core.cache import cache
 from app.core.utils import extract_domain_from_url
 
 logger = logging.getLogger(__name__)
@@ -130,20 +131,20 @@ class DataWorker:
             async with db_manager.get_data_pool().acquire() as conn:
                 async with conn.transaction():
                     logger.debug(f"Processing data for ID: {data.get('id')}")  # Changed to debug
-                    source_id = await self.get_or_create_source(conn, data.get('source'))
-                    city_id = await self.get_or_create_city(conn, data.get('cityName'))
+                    source_id = await self.get_or_create_source_cached(conn, data.get('source'))
+                    city_id = await self.get_or_create_city_cached(conn, data.get('cityName'))
                     text_category = data.get('text_category', {})
                     logger.debug(f"Raw text_category data: {text_category}")  # Changed to debug
-                    first_cat_id, first_cat_value = await self.process_category(conn, text_category.get('first_cat', {}))
-                    second_cat_id, second_cat_value = await self.process_category(conn, text_category.get('second_cat', {}))
-                    third_cat_id, third_cat_value = await self.process_category(conn, text_category.get('third_cat', {}))
+                    first_cat_id, first_cat_value = await self.process_category_cached(conn, text_category.get('first_cat', {}))
+                    second_cat_id, second_cat_value = await self.process_category_cached(conn, text_category.get('second_cat', {}))
+                    third_cat_id, third_cat_value = await self.process_category_cached(conn, text_category.get('third_cat', {}))
                     logger.debug(f"Processed categories:")  # Changed to debug
                     logger.debug(f"  First: ID={first_cat_id}, value={first_cat_value}")  # Changed to debug
                     logger.debug(f"  Second: ID={second_cat_id}, value={second_cat_value}")  # Changed to debug
                     logger.debug(f"  Third: ID={third_cat_id}, value={third_cat_value}")  # Changed to debug
-                    entities_id, entities_value = await self.process_entities(conn, data.get('nf_entities', {}))
-                    tags_id = await self.process_tags(conn, data.get('nf_tags', []))
-                    domain_id = await self.get_or_create_domain(conn, data.get('origin_url'))
+                    entities_id, entities_value = await self.process_entities_cached(conn, data.get('nf_entities', {}))
+                    tags_id = await self.process_tags_cached(conn, data.get('nf_tags', []))
+                    domain_id = await self.get_or_create_domain_cached(conn, data.get('origin_url'))
                     
                     # Process new fields
                     date_value = self.parse_date(data.get('date'))
@@ -188,11 +189,21 @@ class DataWorker:
             logger.error(f"Error inserting data: {e}")
             raise
 
-    async def get_or_create_source(self, conn, source_name: str) -> Optional[int]:
+    async def get_or_create_source_cached(self, conn, source_name: str) -> Optional[int]:
+        """Get or create source with Redis caching"""
         if not source_name:
             return None
-        # Use INSERT with ON CONFLICT to handle race conditions atomically
-        return await conn.fetchval(
+            
+        cache_key = f"source:{source_name}"
+        
+        # Try to get from cache first
+        cached_id = await cache.get(cache_key)
+        if cached_id is not None:
+            logger.debug(f"Source '{source_name}' found in cache: {cached_id}")
+            return cached_id
+        
+        # If not in cache, get from database
+        source_id = await conn.fetchval(
             """
             INSERT INTO source_data (source_name) VALUES ($1)
             ON CONFLICT (source_name) DO UPDATE SET source_name = EXCLUDED.source_name
@@ -200,12 +211,29 @@ class DataWorker:
             """, 
             source_name
         )
+        
+        # Cache the result
+        if source_id:
+            await cache.set(cache_key, source_id)
+            logger.debug(f"Source '{source_name}' cached: {source_id}")
+        
+        return source_id
 
-    async def get_or_create_city(self, conn, city_name: str) -> Optional[int]:
+    async def get_or_create_city_cached(self, conn, city_name: str) -> Optional[int]:
+        """Get or create city with Redis caching"""
         if not city_name:
             return None
-        # Use INSERT with ON CONFLICT to handle race conditions atomically
-        return await conn.fetchval(
+            
+        cache_key = f"city:{city_name}"
+        
+        # Try to get from cache first
+        cached_id = await cache.get(cache_key)
+        if cached_id is not None:
+            logger.debug(f"City '{city_name}' found in cache: {cached_id}")
+            return cached_id
+        
+        # If not in cache, get from database
+        city_id = await conn.fetchval(
             """
             INSERT INTO city_data (city_name) VALUES ($1)
             ON CONFLICT (city_name) DO UPDATE SET city_name = EXCLUDED.city_name
@@ -213,15 +241,32 @@ class DataWorker:
             """, 
             city_name
         )
+        
+        # Cache the result
+        if city_id:
+            await cache.set(cache_key, city_id)
+            logger.debug(f"City '{city_name}' cached: {city_id}")
+        
+        return city_id
 
-    async def get_or_create_domain(self, conn, url: str) -> Optional[int]:
+    async def get_or_create_domain_cached(self, conn, url: str) -> Optional[int]:
+        """Get or create domain with Redis caching"""
         if not url:
             return None
         domain = extract_domain_from_url(url)
         if not domain:
             return None
-        # Use INSERT with ON CONFLICT to handle race conditions atomically
-        return await conn.fetchval(
+            
+        cache_key = f"domain:{domain}"
+        
+        # Try to get from cache first
+        cached_id = await cache.get(cache_key)
+        if cached_id is not None:
+            logger.debug(f"Domain '{domain}' found in cache: {cached_id}")
+            return cached_id
+        
+        # If not in cache, get from database
+        domain_id = await conn.fetchval(
             """
             INSERT INTO domain_data (domain_name) VALUES ($1)
             ON CONFLICT (domain_name) DO UPDATE SET domain_name = EXCLUDED.domain_name
@@ -229,8 +274,16 @@ class DataWorker:
             """, 
             domain
         )
+        
+        # Cache the result
+        if domain_id:
+            await cache.set(cache_key, domain_id)
+            logger.debug(f"Domain '{domain}' cached: {domain_id}")
+        
+        return domain_id
 
-    async def process_category(self, conn, category: Dict) -> Tuple[Optional[int], Optional[float]]:
+    async def process_category_cached(self, conn, category: Dict) -> Tuple[Optional[int], Optional[float]]:
+        """Process category with Redis caching"""
         if not category or not isinstance(category, dict):
             return None, None
         try:
@@ -241,6 +294,16 @@ class DataWorker:
             except (TypeError, ValueError):
                 logger.warning(f"Could not convert category value to float: {category_value}")
                 confidence_value = None
+                
+            cache_key = f"category:{category_name}"
+            
+            # Try to get from cache first
+            cached_id = await cache.get(cache_key)
+            if cached_id is not None:
+                logger.debug(f"Category '{category_name}' found in cache: {cached_id}")
+                return cached_id, confidence_value
+            
+            # If not in cache, get from database
             category_id = await conn.fetchval(
                 """
                 INSERT INTO text_category_data (category_name)
@@ -250,18 +313,39 @@ class DataWorker:
                 """,
                 category_name
             )
+            
+            # Cache the result
+            if category_id:
+                await cache.set(cache_key, category_id)
+                logger.debug(f"Category '{category_name}' cached: {category_id}")
+            
             logger.debug(f"Category '{category_name}' -> ID: {category_id}, Value: {confidence_value}")
             return category_id, confidence_value
         except (IndexError, KeyError) as e:
             logger.error(f"Error processing category {category}: {e}")
             return None, None
 
-    async def process_entities(self, conn, entities_data: Dict) -> Tuple[Optional[int], Optional[float]]:
+    async def process_entities_cached(self, conn, entities_data: Dict) -> Tuple[Optional[int], Optional[float]]:
+        """Process entities with Redis caching"""
         if not entities_data or not isinstance(entities_data, dict):
             return None, None
         try:
             entity_name = list(entities_data.keys())[0]
             entity_value = list(entities_data.values())[0]
+            
+            cache_key = f"entity:{entity_name}"
+            
+            # Try to get from cache first
+            cached_id = await cache.get(cache_key)
+            if cached_id is not None:
+                logger.debug(f"Entity '{entity_name}' found in cache: {cached_id}")
+                try:
+                    entity_float_value = float(entity_value) if entity_value is not None else None
+                except (TypeError, ValueError):
+                    entity_float_value = None
+                return cached_id, entity_float_value
+            
+            # If not in cache, get from database
             entity_id = await conn.fetchval(
                 """
                 INSERT INTO nf_entities_data (entity_name)
@@ -271,6 +355,12 @@ class DataWorker:
                 """,
                 entity_name
             )
+            
+            # Cache the result
+            if entity_id:
+                await cache.set(cache_key, entity_id)
+                logger.debug(f"Entity '{entity_name}' cached: {entity_id}")
+            
             try:
                 entity_float_value = float(entity_value) if entity_value is not None else None
             except (TypeError, ValueError):
@@ -280,11 +370,22 @@ class DataWorker:
             logger.error(f"Error processing entities {entities_data}: {e}")
             return None, None
 
-    async def process_tags(self, conn, tags_data: List) -> Optional[int]:
+    async def process_tags_cached(self, conn, tags_data: List) -> Optional[int]:
+        """Process tags with Redis caching"""
         if not tags_data or not isinstance(tags_data, list):
             return None
         try:
             tag_name = tags_data[0]
+            
+            cache_key = f"tag:{tag_name}"
+            
+            # Try to get from cache first
+            cached_id = await cache.get(cache_key)
+            if cached_id is not None:
+                logger.debug(f"Tag '{tag_name}' found in cache: {cached_id}")
+                return cached_id
+            
+            # If not in cache, get from database
             tag_id = await conn.fetchval(
                 """
                 INSERT INTO nf_tags_data (tag_name)
@@ -294,6 +395,12 @@ class DataWorker:
                 """,
                 tag_name
             )
+            
+            # Cache the result
+            if tag_id:
+                await cache.set(cache_key, tag_id)
+                logger.debug(f"Tag '{tag_name}' cached: {tag_id}")
+            
             return tag_id
         except (IndexError, KeyError) as e:
             logger.error(f"Error processing tags {tags_data}: {e}")

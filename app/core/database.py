@@ -3,6 +3,7 @@ import aio_pika
 from typing import Optional
 import logging
 from .config import settings
+from .cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,9 @@ class DatabaseManager:
     async def initialize_connections(self):
         """Initialize database and RabbitMQ connections"""
         try:
+            # Initialize Redis cache
+            await cache.connect()
+            
             # Initialize PostgreSQL connection pools (increased for higher concurrency)
             self.data_pool = await asyncpg.create_pool(
                 settings.database_url_1, 
@@ -108,6 +112,13 @@ class DatabaseManager:
                 logger.info("RabbitMQ connection closed")
         except Exception as e:
             logger.error(f"Error closing RabbitMQ connection: {e}")
+            
+        try:
+            # Cleanup Redis cache
+            await cache.disconnect()
+            logger.info("Redis cache disconnected")
+        except Exception as e:
+            logger.error(f"Error disconnecting Redis cache: {e}")
     
     def get_data_pool(self) -> Optional[asyncpg.Pool]:
         return self.data_pool
