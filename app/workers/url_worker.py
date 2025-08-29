@@ -21,13 +21,21 @@ class UrlWorker:
         self._buffer_msgs: List[aio_pika.IncomingMessage] = []
         self._lock = asyncio.Lock()
         self._flush_task: asyncio.Task | None = None
-        self._batch_size = getattr(settings, 'default_batch_size', 100)
-        self._flush_interval = getattr(settings, 'batch_flush_seconds', 5)
+        self._batch_size = getattr(settings, 'default_batch_size', 200)  # Increased from 100 to 200
+        self._flush_interval = getattr(settings, 'batch_flush_seconds', 3)  # Reduced from 5 to 3 seconds
     
     async def start(self):
         """Start the URL worker"""
         self.is_running = True
         logger.info("URL worker started")
+        # Create dedicated channel with higher prefetch for URL consumption
+        try:
+            self._connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+            self._channel = await self._connection.channel()
+            await self._channel.set_qos(prefetch_count=max(200, self._batch_size))
+            logger.info("URL worker created dedicated RabbitMQ channel")
+        except Exception as e:
+            logger.error(f"Failed to create dedicated channel for UrlWorker: {e}")
         # Start periodic flush
         self._flush_task = asyncio.create_task(self._periodic_flush())
         await self.consume_url_queue()
@@ -68,8 +76,20 @@ class UrlWorker:
     async def _ensure_channel(self) -> aio_pika.Channel:
         """Ensure we have a working RabbitMQ channel"""
         try:
+            # If we already have a working channel, return it
             if self._channel and not self._channel.is_closed:
                 return self._channel
+            
+            # If we have a connection but no channel, create a new channel
+            if self._connection and not self._connection.is_closed:
+                try:
+                    self._channel = await self._connection.channel()
+                    await self._channel.set_qos(prefetch_count=max(200, self._batch_size))
+                    logger.info("URL worker created new channel on existing connection")
+                    return self._channel
+                except Exception as e:
+                    logger.warning(f"Failed to create channel on existing connection: {e}")
+                    # Fall through to create new connection
             
             # Close existing connection if it exists
             if self._connection and not self._connection.is_closed:
@@ -82,7 +102,7 @@ class UrlWorker:
             self._connection = await aio_pika.connect_robust(settings.rabbitmq_url)
             self._channel = await self._connection.channel()
             await self._channel.set_qos(prefetch_count=max(200, self._batch_size))
-            logger.info("URL worker created new RabbitMQ channel")
+            logger.info("URL worker created new RabbitMQ connection and channel")
             return self._channel
         except Exception as e:
             logger.error(f"URL worker failed to create channel: {e}")
@@ -167,22 +187,25 @@ class UrlWorker:
         if not url_data:
             return
         try:
+            # Extract URLs for deduplication and insertion
+            urls = [item[0] for item in url_data]
+            # Deduplicate in-memory first to reduce DB work
+            unique_urls = list(dict.fromkeys(urls))
+            
+            # Batch insert with single database transaction
             async with db_manager.get_url_pool().acquire() as conn:
-                # Extract URLs for deduplication and insertion
-                urls = [item[0] for item in url_data]
-                # Deduplicate in-memory first to reduce DB work
-                unique_urls = list(dict.fromkeys(urls))
-                # Insert all with a single statement; RETURNING gives only newly inserted
-                rows = await conn.fetch(
-                    """
-                    INSERT INTO urls (url)
-                    SELECT unnest($1::text[])
-                    ON CONFLICT (url) DO NOTHING
-                    RETURNING url
-                    """,
-                    unique_urls
-                )
-                inserted_urls = [r['url'] for r in rows]
+                async with conn.transaction():
+                    # Insert all with a single statement; RETURNING gives only newly inserted
+                    rows = await conn.fetch(
+                        """
+                        INSERT INTO urls (url)
+                        SELECT unnest($1::text[])
+                        ON CONFLICT (url) DO NOTHING
+                        RETURNING url
+                        """,
+                        unique_urls
+                    )
+                    inserted_urls = [r['url'] for r in rows]
 
             # Publish only newly inserted URLs that don't have 4xx status codes
             if inserted_urls:
@@ -191,26 +214,38 @@ class UrlWorker:
                 # Create a mapping of URLs to their status codes
                 url_status_map = {item[0]: item[1] for item in url_data}
                 
+                # Batch publish messages for better performance
+                publish_tasks = []
                 for url in inserted_urls:
                     status_code = url_status_map.get(url)
                     
                     # Skip URLs with 4xx status codes
                     if status_code and 400 <= status_code < 500:
-                        logger.info(f"Skipping 4xx URL from scraper_queue: {url} (status: {status_code})")
+                        logger.debug(f"Skipping 4xx URL from scraper_queue: {url} (status: {status_code})")
                         continue
                     
-                    try:
-                        await channel.default_exchange.publish(
+                    # Create publish task
+                    publish_tasks.append(
+                        channel.default_exchange.publish(
                             aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                             routing_key=settings.scraper_queue
                         )
-                    except Exception as e:
-                        logger.error(f"Error publishing URL to scraper_queue: {e}")
+                    )
+                
+                # Execute all publish tasks concurrently
+                if publish_tasks:
+                    await asyncio.gather(*publish_tasks, return_exceptions=True)
+                    logger.debug(f"Published {len(publish_tasks)} URLs to scraper queue")
 
             # Ack all consumed messages after DB success (even duplicates/no-ops)
             for msg in messages:
                 await msg.ack()
             self.processed_count += len(messages)
+            
+            # Log progress every 1000 processed URLs
+            if self.processed_count % 1000 == 0:
+                logger.info(f"URL worker processed {self.processed_count} URLs total")
+                
         except Exception as e:
             logger.error(f"Error in URL batch insert/publish: {e}")
             # Nack all on failure to avoid stuck messages
