@@ -16,6 +16,7 @@ class UrlWorker:
         self.is_running = False
         self.processed_count = 0
         self._channel = None
+        self._connection = None
         self._buffer: List[str] = []
         self._buffer_msgs: List[aio_pika.IncomingMessage] = []
         self._lock = asyncio.Lock()
@@ -27,14 +28,6 @@ class UrlWorker:
         """Start the URL worker"""
         self.is_running = True
         logger.info("URL worker started")
-        # Create dedicated channel with higher prefetch for URL consumption
-        try:
-            connection = db_manager.get_rabbitmq_connection()
-            if connection:
-                self._channel = await connection.channel()
-                await self._channel.set_qos(prefetch_count=max(200, self._batch_size))
-        except Exception as e:
-            logger.error(f"Failed to create dedicated channel for UrlWorker: {e}")
         # Start periodic flush
         self._flush_task = asyncio.create_task(self._periodic_flush())
         await self.consume_url_queue()
@@ -66,53 +59,91 @@ class UrlWorker:
                 await self._channel.close()
             except Exception:
                 pass
+        if self._connection and not self._connection.is_closed:
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
+
+    async def _ensure_channel(self) -> aio_pika.Channel:
+        """Ensure we have a working RabbitMQ channel"""
+        try:
+            if self._channel and not self._channel.is_closed:
+                return self._channel
+            
+            # Close existing connection if it exists
+            if self._connection and not self._connection.is_closed:
+                try:
+                    await self._connection.close()
+                except Exception:
+                    pass
+            
+            # Create new connection and channel
+            self._connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+            self._channel = await self._connection.channel()
+            await self._channel.set_qos(prefetch_count=max(200, self._batch_size))
+            logger.info("URL worker created new RabbitMQ channel")
+            return self._channel
+        except Exception as e:
+            logger.error(f"URL worker failed to create channel: {e}")
+            raise
     
     async def consume_url_queue(self):
         """Consume URLs from newsbreak_urls_queue"""
-        try:
-            channel = self._channel or db_manager.get_rabbitmq_channel()
-            urls_queue = await channel.declare_queue(
-                settings.newsbreak_urls_queue, 
-                durable=True
-            )
-            
-            async with urls_queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    if not self.is_running:
-                        break
-                    
-                    try:
-                        message_body = message.body.decode()
+        while self.is_running:
+            try:
+                channel = await self._ensure_channel()
+                urls_queue = await channel.declare_queue(
+                    settings.newsbreak_urls_queue, 
+                    durable=True
+                )
+                
+                async with urls_queue.iterator() as queue_iter:
+                    async for message in queue_iter:
+                        if not self.is_running:
+                            break
                         
-                        # Try to parse as JSON (for 4xx error messages) or plain URL
                         try:
-                            message_data = json.loads(message_body)
-                            url = message_data.get('url', message_body)
-                            status_code = message_data.get('status_code')
-                        except json.JSONDecodeError:
-                            # Plain URL message
-                            url = message_body
-                            status_code = None
-                        
-                        # Buffer for batch insert
-                        async with self._lock:
-                            self._buffer.append((url, status_code))  # Store URL with status code
-                            self._buffer_msgs.append(message)
-                            should_flush = len(self._buffer) >= self._batch_size
-                        if should_flush:
-                            # Snapshot outside lock
+                            message_body = message.body.decode()
+                            
+                            # Try to parse as JSON (for 4xx error messages) or plain URL
+                            try:
+                                message_data = json.loads(message_body)
+                                url = message_data.get('url', message_body)
+                                status_code = message_data.get('status_code')
+                            except json.JSONDecodeError:
+                                # Plain URL message
+                                url = message_body
+                                status_code = None
+                            
+                            # Buffer for batch insert
                             async with self._lock:
-                                url_data = self._buffer[:]
-                                msgs = self._buffer_msgs[:]
-                                self._buffer.clear(); self._buffer_msgs.clear()
-                            await self._insert_and_publish_batch(url_data, msgs)
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing URL message: {e}")
-                        await message.nack(requeue=False)
-                        
-        except Exception as e:
-            logger.error(f"URL worker error: {e}")
+                                self._buffer.append((url, status_code))  # Store URL with status code
+                                self._buffer_msgs.append(message)
+                                should_flush = len(self._buffer) >= self._batch_size
+                            if should_flush:
+                                # Snapshot outside lock
+                                async with self._lock:
+                                    url_data = self._buffer[:]
+                                    msgs = self._buffer_msgs[:]
+                                    self._buffer.clear(); self._buffer_msgs.clear()
+                                await self._insert_and_publish_batch(url_data, msgs)
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing URL message: {e}")
+                            await message.nack(requeue=False)
+                            
+            except aio_pika.exceptions.ChannelClosed as e:
+                logger.warning(f"URL worker channel closed, reconnecting: {e}")
+                await asyncio.sleep(5)  # Wait before reconnecting
+                continue
+            except aio_pika.exceptions.ConnectionClosed as e:
+                logger.warning(f"URL worker connection closed, reconnecting: {e}")
+                await asyncio.sleep(5)  # Wait before reconnecting
+                continue
+            except Exception as e:
+                logger.error(f"URL worker error: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
     
     async def insert_url(self, url: str):
         """(Kept for compatibility) Insert single URL; prefer batch path."""
@@ -123,8 +154,9 @@ class UrlWorker:
                     url
                 ) is not None
             if inserted:
-                await db_manager.get_rabbitmq_channel().default_exchange.publish(
-                    aio_pika.Message(url.encode()),
+                channel = await self._ensure_channel()
+                await channel.default_exchange.publish(
+                    aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                     routing_key=settings.scraper_queue
                 )
         except Exception as e:
@@ -154,7 +186,7 @@ class UrlWorker:
 
             # Publish only newly inserted URLs that don't have 4xx status codes
             if inserted_urls:
-                channel = self._channel or db_manager.get_rabbitmq_channel()
+                channel = await self._ensure_channel()
                 
                 # Create a mapping of URLs to their status codes
                 url_status_map = {item[0]: item[1] for item in url_data}

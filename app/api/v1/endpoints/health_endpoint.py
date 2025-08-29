@@ -36,7 +36,7 @@ class HealthEndpoint:
             
             # Check RabbitMQ connection
             rabbitmq_channel = get_rabbitmq_channel()
-            await rabbitmq_channel.declare_queue("health_check", durable=False, auto_delete=True)
+            await rabbitmq_channel.declare_queue("health_check", durable=True)
             
             # Get worker status
             workers = get_workers()

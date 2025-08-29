@@ -96,7 +96,7 @@ class UrlEndpoint:
                         
                         # Add to scraper queue
                         await rabbitmq_channel.default_exchange.publish(
-                            aio_pika.Message(url_str.encode()),
+                            aio_pika.Message(url_str.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                             routing_key=settings.scraper_queue
                         )
                         urls_added += 1

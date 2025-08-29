@@ -27,6 +27,8 @@ class ScraperWorker:
         self.session: Optional[aiohttp.ClientSession] = None
         self.is_running = False
         self.processed_count = 0
+        self._channel: Optional[aio_pika.Channel] = None
+        self._connection: Optional[aio_pika.Connection] = None
 
     async def start(self):
         self.is_running = True
@@ -43,74 +45,118 @@ class ScraperWorker:
         self.is_running = False
         if self.session:
             await self.session.close()
+        if self._channel and not self._channel.is_closed:
+            try:
+                await self._channel.close()
+            except Exception:
+                pass
+        if self._connection and not self._connection.is_closed:
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
         logger.info(f"Worker {self.worker_number} stopped. Processed {self.processed_count} URLs")
 
-    async def consume_scraper_queue(self):
+    async def _ensure_channel(self) -> aio_pika.Channel:
+        """Ensure we have a working RabbitMQ channel"""
         try:
-            scraper_queue = await db_manager.get_rabbitmq_channel().declare_queue(
-                settings.scraper_queue,
-                durable=True,
-                arguments={
-                    "x-dead-letter-exchange": "",
-                    "x-dead-letter-routing-key": settings.dlx_queue
-                }
-            )
+            if self._channel and not self._channel.is_closed:
+                return self._channel
+            
+            # Close existing connection if it exists
+            if self._connection and not self._connection.is_closed:
+                try:
+                    await self._connection.close()
+                except Exception:
+                    pass
+            
+            # Create new connection and channel
+            self._connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+            self._channel = await self._connection.channel()
+            await self._channel.set_qos(prefetch_count=10)
+            logger.info(f"Worker {self.worker_number} created new RabbitMQ channel")
+            return self._channel
+        except Exception as e:
+            logger.error(f"Worker {self.worker_number} failed to create channel: {e}")
+            raise
 
-            async with scraper_queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    if not self.is_running:
-                        break
+    async def consume_scraper_queue(self):
+        while self.is_running:
+            try:
+                channel = await self._ensure_channel()
+                scraper_queue = await channel.declare_queue(
+                    settings.scraper_queue,
+                    durable=True,
+                    arguments={
+                        "x-dead-letter-exchange": "",
+                        "x-dead-letter-routing-key": settings.dlx_queue
+                    }
+                )
 
-                    try:
-                        # Try to parse as JSON (for retry messages) or plain URL
-                        message_body = message.body.decode()
-                        retry_count = 0
-                        
+                async with scraper_queue.iterator() as queue_iter:
+                    async for message in queue_iter:
+                        if not self.is_running:
+                            break
+
                         try:
-                            # Check if it's a retry message with JSON data
-                            message_data = json.loads(message_body)
-                            url = message_data.get('url', message_body)
-                            retry_count = message_data.get('retry_count', 0)
-                            if retry_count > 0:
-                                logger.info(f"Worker {self.worker_number} processing retry URL: {url} (attempt {retry_count}/3)")
-                            else:
+                            # Try to parse as JSON (for retry messages) or plain URL
+                            message_body = message.body.decode()
+                            retry_count = 0
+                            
+                            try:
+                                # Check if it's a retry message with JSON data
+                                message_data = json.loads(message_body)
+                                url = message_data.get('url', message_body)
+                                retry_count = message_data.get('retry_count', 0)
+                                if retry_count > 0:
+                                    logger.info(f"Worker {self.worker_number} processing retry URL: {url} (attempt {retry_count}/3)")
+                                else:
+                                    logger.info(f"Worker {self.worker_number} processing URL: {url}")
+                            except json.JSONDecodeError:
+                                # Plain URL message (not a retry)
+                                url = message_body
                                 logger.info(f"Worker {self.worker_number} processing URL: {url}")
-                        except json.JSONDecodeError:
-                            # Plain URL message (not a retry)
-                            url = message_body
-                            logger.info(f"Worker {self.worker_number} processing URL: {url}")
 
-                        result = await self.scrape_url(url)
-                        if result:
-                            extracted_urls, extracted_data = result
-                            await self.handle_extracted_data(extracted_urls, extracted_data)
+                            result = await self.scrape_url(url)
+                            if result:
+                                extracted_urls, extracted_data = result
+                                await self.handle_extracted_data(extracted_urls, extracted_data)
 
-                        self.processed_count += 1
-                        if self.processed_count % 50 == 0:
-                            logger.info(f"Worker {self.worker_number} processed {self.processed_count} URLs")
-                        await message.ack()
-                        await asyncio.sleep(1)
+                            self.processed_count += 1
+                            if self.processed_count % 50 == 0:
+                                logger.info(f"Worker {self.worker_number} processed {self.processed_count} URLs")
+                            await message.ack()
+                            await asyncio.sleep(1)
 
-                    except HTTPError as e:
-                        # Handle HTTP errors based on status code
-                        if 500 <= e.status_code < 600:
-                            # 5xx errors (server errors) - send to DLX for retry
-                            logger.warning(f"Worker {self.worker_number} server error {e.status_code} for URL: {url}")
+                        except HTTPError as e:
+                            # Handle HTTP errors based on status code
+                            if 500 <= e.status_code < 600:
+                                # 5xx errors (server errors) - send to DLX for retry
+                                logger.warning(f"Worker {self.worker_number} server error {e.status_code} for URL: {url}")
+                                await message.nack(requeue=False)
+                                await self.send_to_dlx(url, str(e), retry_count)
+                            else:
+                                # 4xx errors (client errors) - send to urls_queue with status code
+                                logger.info(f"Worker {self.worker_number} client error {e.status_code} for URL: {url} - sending to urls_queue")
+                                await self.send_4xx_to_urls_queue(url, e.status_code)
+                                await message.ack()  # Acknowledge to remove from queue
+                        except Exception as e:
+                            # Other errors (network, parsing, etc.) - send to DLX
+                            logger.error(f"Worker {self.worker_number} error processing message: {e}")
                             await message.nack(requeue=False)
                             await self.send_to_dlx(url, str(e), retry_count)
-                        else:
-                            # 4xx errors (client errors) - send to urls_queue with status code
-                            logger.info(f"Worker {self.worker_number} client error {e.status_code} for URL: {url} - sending to urls_queue")
-                            await self.send_4xx_to_urls_queue(url, e.status_code)
-                            await message.ack()  # Acknowledge to remove from queue
-                    except Exception as e:
-                        # Other errors (network, parsing, etc.) - send to DLX
-                        logger.error(f"Worker {self.worker_number} error processing message: {e}")
-                        await message.nack(requeue=False)
-                        await self.send_to_dlx(url, str(e), retry_count)
 
-        except Exception as e:
-            logger.error(f"Worker {self.worker_number} consume error: {e}")
+            except aio_pika.exceptions.ChannelClosed as e:
+                logger.warning(f"Worker {self.worker_number} channel closed, reconnecting: {e}")
+                await asyncio.sleep(5)  # Wait before reconnecting
+                continue
+            except aio_pika.exceptions.ConnectionClosed as e:
+                logger.warning(f"Worker {self.worker_number} connection closed, reconnecting: {e}")
+                await asyncio.sleep(5)  # Wait before reconnecting
+                continue
+            except Exception as e:
+                logger.error(f"Worker {self.worker_number} consume error: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
 
     async def scrape_url(self, url: str):
         try:
@@ -258,16 +304,19 @@ class ScraperWorker:
                 for url in unique_urls:
                     try:
                         if await self.check_deduplication(url):
-                            await db_manager.get_rabbitmq_channel().default_exchange.publish(
+                            channel = await self._ensure_channel()
+                            await channel.default_exchange.publish(
                                 aio_pika.Message(url.encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                                 routing_key=settings.newsbreak_urls_queue
                             )
+                            urls_sent += 1
                     except Exception as e:
                         logger.error(f"Error publishing URL to queues: {e}")
                 logger.info(f"Queued {urls_sent}/{len(unique_urls)} deduped URLs to both queues")
 
             if data:
-                await db_manager.get_rabbitmq_channel().default_exchange.publish(
+                channel = await self._ensure_channel()
+                await channel.default_exchange.publish(
                     aio_pika.Message(json.dumps(data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                     routing_key=settings.newsbreak_data_queue
                 )
@@ -300,7 +349,8 @@ class ScraperWorker:
                 'timestamp': datetime.utcnow().isoformat(),
                 'worker_number': self.worker_number
             }
-            await db_manager.get_rabbitmq_channel().default_exchange.publish(
+            channel = await self._ensure_channel()
+            await channel.default_exchange.publish(
                 aio_pika.Message(json.dumps(message_data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                 routing_key=settings.newsbreak_urls_queue
             )
@@ -317,7 +367,8 @@ class ScraperWorker:
                 'timestamp': datetime.utcnow().isoformat(), 
                 'worker_number': self.worker_number
             }
-            await db_manager.get_rabbitmq_channel().default_exchange.publish(
+            channel = await self._ensure_channel()
+            await channel.default_exchange.publish(
                 aio_pika.Message(json.dumps(message_data).encode(), delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
                 routing_key=settings.dlx_queue
             )

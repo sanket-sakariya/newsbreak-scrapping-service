@@ -17,6 +17,8 @@ class DataWorker:
         self.processed_count = 0
         self._sem = asyncio.Semaphore(getattr(settings, 'data_worker_concurrency', 5))
         self._pending: set[asyncio.Task] = set()
+        self._channel: Optional[aio_pika.Channel] = None
+        self._connection: Optional[aio_pika.Connection] = None
 
     async def start(self):
         self.is_running = True
@@ -31,24 +33,68 @@ class DataWorker:
                 await asyncio.gather(*self._pending, return_exceptions=True)
         except Exception:
             pass
+        if self._channel and not self._channel.is_closed:
+            try:
+                await self._channel.close()
+            except Exception:
+                pass
+        if self._connection and not self._connection.is_closed:
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
         logger.info(f"Data worker stopped. Processed {self.processed_count} records")
 
-    async def consume_data_queue(self):
+    async def _ensure_channel(self) -> aio_pika.Channel:
+        """Ensure we have a working RabbitMQ channel"""
         try:
-            data_queue = await db_manager.get_rabbitmq_channel().declare_queue(
-                settings.newsbreak_data_queue,
-                durable=True
-            )
-            async with data_queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    if not self.is_running:
-                        break
-                    # Process concurrently with bounded concurrency
-                    task = asyncio.create_task(self._handle_message(message))
-                    self._pending.add(task)
-                    task.add_done_callback(self._pending.discard)
+            if self._channel and not self._channel.is_closed:
+                return self._channel
+            
+            # Close existing connection if it exists
+            if self._connection and not self._connection.is_closed:
+                try:
+                    await self._connection.close()
+                except Exception:
+                    pass
+            
+            # Create new connection and channel
+            self._connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+            self._channel = await self._connection.channel()
+            await self._channel.set_qos(prefetch_count=10)
+            logger.info("Data worker created new RabbitMQ channel")
+            return self._channel
         except Exception as e:
-            logger.error(f"Data worker error: {e}")
+            logger.error(f"Data worker failed to create channel: {e}")
+            raise
+
+    async def consume_data_queue(self):
+        while self.is_running:
+            try:
+                channel = await self._ensure_channel()
+                data_queue = await channel.declare_queue(
+                    settings.newsbreak_data_queue,
+                    durable=True
+                )
+                async with data_queue.iterator() as queue_iter:
+                    async for message in queue_iter:
+                        if not self.is_running:
+                            break
+                        # Process concurrently with bounded concurrency
+                        task = asyncio.create_task(self._handle_message(message))
+                        self._pending.add(task)
+                        task.add_done_callback(self._pending.discard)
+            except aio_pika.exceptions.ChannelClosed as e:
+                logger.warning(f"Data worker channel closed, reconnecting: {e}")
+                await asyncio.sleep(5)  # Wait before reconnecting
+                continue
+            except aio_pika.exceptions.ConnectionClosed as e:
+                logger.warning(f"Data worker connection closed, reconnecting: {e}")
+                await asyncio.sleep(5)  # Wait before reconnecting
+                continue
+            except Exception as e:
+                logger.error(f"Data worker error: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
 
     async def _handle_message(self, message: aio_pika.IncomingMessage):
         async with self._sem:
@@ -60,6 +106,12 @@ class DataWorker:
                 # Log progress every 100 records instead of every record
                 if self.processed_count % 100 == 0:
                     logger.info(f"Data worker processed {self.processed_count} records")
+            except json.JSONDecodeError as e:
+                logger.error(f"Error decoding JSON from message: {e}")
+                try:
+                    await message.nack(requeue=False)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Error processing data message: {e}")
                 try:

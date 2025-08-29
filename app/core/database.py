@@ -31,8 +31,11 @@ class DatabaseManager:
             )
             logger.info("Database connection pool initialized for URLs")
             
-            # Initialize RabbitMQ connection
-            self.rabbitmq_connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+            # Initialize RabbitMQ connection with robust connection
+            self.rabbitmq_connection = await aio_pika.connect_robust(
+                settings.rabbitmq_url,
+                timeout=30  # Add timeout
+            )
             self.rabbitmq_channel = await self.rabbitmq_connection.channel()
             await self.rabbitmq_channel.set_qos(prefetch_count=settings.data_worker_concurrency)
             logger.info("RabbitMQ connection initialized")
@@ -78,12 +81,33 @@ class DatabaseManager:
     
     async def cleanup_connections(self):
         """Cleanup connections on shutdown"""
-        if self.data_pool:
-            await self.data_pool.close()
-        if self.url_pool:
-            await self.url_pool.close()
-        if self.rabbitmq_connection:
-            await self.rabbitmq_connection.close()
+        try:
+            if self.data_pool:
+                await self.data_pool.close()
+                logger.info("Data pool closed")
+        except Exception as e:
+            logger.error(f"Error closing data pool: {e}")
+            
+        try:
+            if self.url_pool:
+                await self.url_pool.close()
+                logger.info("URL pool closed")
+        except Exception as e:
+            logger.error(f"Error closing URL pool: {e}")
+            
+        try:
+            if self.rabbitmq_channel and not self.rabbitmq_channel.is_closed:
+                await self.rabbitmq_channel.close()
+                logger.info("RabbitMQ channel closed")
+        except Exception as e:
+            logger.error(f"Error closing RabbitMQ channel: {e}")
+            
+        try:
+            if self.rabbitmq_connection and not self.rabbitmq_connection.is_closed:
+                await self.rabbitmq_connection.close()
+                logger.info("RabbitMQ connection closed")
+        except Exception as e:
+            logger.error(f"Error closing RabbitMQ connection: {e}")
     
     def get_data_pool(self) -> Optional[asyncpg.Pool]:
         return self.data_pool
