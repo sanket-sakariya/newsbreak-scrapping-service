@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Worker Process Monitoring Bot
-Monitors scraper_worker, data_worker, and url_worker processes by checking app.log
+Monitors scraper_worker and data_worker processes by checking app.log
 Sends Telegram alerts if workers are not running or have errors
 """
 
@@ -66,12 +66,6 @@ class WorkerMonitor:
                 r'Data worker processed \d+ records',
                 r'Data worker.*started',
                 r'Worker.*data.*started'
-            ],
-            'url_worker': [
-                r'url_worker.*started',
-                r'URL worker processed \d+ URLs',
-                r'URL worker.*started',
-                r'Worker.*url.*started'
             ]
         }
         self.error_patterns = [
@@ -123,8 +117,7 @@ class WorkerMonitor:
         """Check worker activity in log lines"""
         worker_status = {
             'scraper_worker': {'active': False, 'last_seen': None, 'errors': []},
-            'data_worker': {'active': False, 'last_seen': None, 'errors': []},
-            'url_worker': {'active': False, 'last_seen': None, 'errors': []}
+            'data_worker': {'active': False, 'last_seen': None, 'errors': []}
         }
         
         for line in log_lines:
@@ -282,6 +275,7 @@ class WorkerMonitor:
             workers_with_errors = [name for name, status in worker_status.items() if status['errors']]
             
             # Determine if we need to send an alert
+            # NOTE: Only sends alerts when there are problems, NOT when workers are running normally
             needs_alert = bool(inactive_workers or workers_with_errors)
             
             if needs_alert:
@@ -308,7 +302,8 @@ class WorkerMonitor:
                 else:
                     logging.error("Failed to send worker status alert")
             else:
-                logging.info("All workers are running normally")
+                # Workers are running normally - NO Telegram message sent (this is intentional)
+                logging.info("All workers are running normally - no alert needed")
                 
         except Exception as e:
             logging.error(f"Error in worker monitoring: {e}")
