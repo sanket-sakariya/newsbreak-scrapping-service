@@ -2,6 +2,7 @@
 """
 Telegram Bot for NewsBreak Scraper Status Monitoring
 Fetches status from NewsBreak API and sends updates to Telegram
+Also integrates with ACK table to get accurate processing rates
 """
 
 import asyncio
@@ -10,7 +11,7 @@ import logging
 from datetime import datetime, timedelta
 import json
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 import asyncpg
 
 # Load environment variables from .env file
@@ -73,6 +74,70 @@ class NewsBreakMonitor:
                 logging.error(f"Error fetching status: {e}")
                 return None
     
+    async def get_today_ack_processing_stats(self) -> Dict[str, Any]:
+        """Get today's URL processing statistics from ACK table"""
+        today = datetime.now().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        today_end = datetime.combine(today, datetime.max.time())
+        
+        stats = {
+            'urls_processed_today': 0,
+            'processing_rate_per_hour': 0.0,
+            'processing_rate_per_minute': 0.0,
+            'total_processing_time': timedelta(0),
+            'ack_data_points': 0
+        }
+        
+        try:
+            conn = await asyncpg.connect(self.db_url_data)
+            try:
+                # Get ACK data points for today
+                rows = await conn.fetch(
+                    """
+                    SELECT ack_total, ack_rate_per_sec, timestamp
+                    FROM ack 
+                    WHERE timestamp >= $1 AND timestamp <= $2
+                    ORDER BY timestamp ASC
+                    """,
+                    today_start, today_end
+                )
+                
+                if rows:
+                    stats['ack_data_points'] = len(rows)
+                    
+                    # Calculate processing difference from first to last record of today
+                    if len(rows) >= 2:
+                        first_record = rows[0]
+                        last_record = rows[-1]
+                        
+                        ack_difference = last_record['ack_total'] - first_record['ack_total']
+                        time_difference = last_record['timestamp'] - first_record['timestamp']
+                        
+                        stats['urls_processed_today'] = ack_difference
+                        stats['total_processing_time'] = time_difference
+                        
+                        # Calculate rates
+                        if time_difference.total_seconds() > 0:
+                            stats['processing_rate_per_hour'] = (ack_difference / (time_difference.total_seconds() / 3600))
+                            stats['processing_rate_per_minute'] = (ack_difference / (time_difference.total_seconds() / 60))
+                    
+                    # If only one record today, use the rate from that record
+                    elif len(rows) == 1:
+                        single_record = rows[0]
+                        stats['urls_processed_today'] = 0  # Can't calculate difference with single point
+                        stats['processing_rate_per_minute'] = single_record['ack_rate_per_sec'] * 60
+                        stats['processing_rate_per_hour'] = single_record['ack_rate_per_sec'] * 3600
+                
+                logging.info(f"Retrieved {stats['ack_data_points']} ACK data points for today")
+                
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logging.error(f"Error fetching today's ACK processing stats: {e}")
+        
+        return stats
+    
     async def get_today_stats_from_db(self) -> dict:
         """Get today's statistics directly from database using created_at field"""
         today = datetime.now().date()
@@ -113,7 +178,7 @@ class NewsBreakMonitor:
         return stats
 
     async def format_daily_report(self, status: dict) -> str:
-        """Format daily status report with today's progress from database"""
+        """Format daily status report with today's progress from database and ACK table"""
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M:%S")
@@ -140,9 +205,12 @@ class NewsBreakMonitor:
         today_urls = today_stats.get('urls_collected_today', 0)
         today_data = today_stats.get('data_extracted_today', 0)
         
-        # For today's processed URLs, we assume all today's collected URLs are processed
-        # (since they would have been processed during the day)
-        today_processed_urls = today_urls
+        # Get today's processing stats from ACK table
+        today_ack_stats = await self.get_today_ack_processing_stats()
+        today_processed_urls = today_ack_stats.get('urls_processed_today', 0)
+        processing_rate_per_hour = today_ack_stats.get('processing_rate_per_hour', 0.0)
+        processing_rate_per_minute = today_ack_stats.get('processing_rate_per_minute', 0.0)
+        ack_data_points = today_ack_stats.get('ack_data_points', 0)
         
         # Status emoji
         status_emoji = "🟢" if scraper_status == "running" else "🔴"
@@ -156,6 +224,16 @@ class NewsBreakMonitor:
         message += f"🔗 URLs Collected: {today_urls:,}\n"
         message += f"🟢 URLs Processed: {today_processed_urls:,}\n"
         message += f"📰 Data Extracted: {today_data:,}\n\n"
+        
+        # Add ACK-based processing rates
+        if ack_data_points > 0:
+            message += f"⚡ <b>Processing Performance (ACK Data):</b>\n"
+            message += f"📊 URLs per Hour: {processing_rate_per_hour:.1f}\n"
+            message += f"⚡ URLs per Minute: {processing_rate_per_minute:.2f}\n"
+            message += f"📈 ACK Data Points: {ack_data_points}\n\n"
+        else:
+            message += f"⚠️ <b>Processing Performance:</b>\n"
+            message += f"📊 No ACK data available for today\n\n"
         
         message += f"📊 <b>Total Statistics:</b>\n"
         message += f"🔗 Total URLs: {current_urls:,}\n"
