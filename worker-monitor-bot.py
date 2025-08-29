@@ -49,7 +49,7 @@ class TelegramBot:
                 return None
 
 class WorkerMonitor:
-    def __init__(self, bot: TelegramBot, log_file: str = "app.log", check_interval_minutes: int = 5):
+    def __init__(self, bot: TelegramBot, log_file: str = "nohup.out", check_interval_minutes: int = 5):
         self.bot = bot
         self.log_file = log_file
         self.check_interval_minutes = check_interval_minutes
@@ -327,7 +327,7 @@ async def main():
     # Configuration from environment variables
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    LOG_FILE = os.getenv("WORKER_LOG_FILE", "~/newsbreak-scrapping-service/app.log")
+    LOG_FILE = os.getenv("WORKER_LOG_FILE", "~/newsbreak-scrapping-service/nohup.out")
     CHECK_INTERVAL = int(os.getenv("WORKER_CHECK_INTERVAL", "5"))
     
     if not BOT_TOKEN or not CHAT_ID:
